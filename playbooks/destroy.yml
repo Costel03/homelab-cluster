@@ -22,7 +22,7 @@
     changed_when: false
 
   - name: Power off and delete the VM
-    when: '("\"" ~ inventory_hostname ~ "\"") in vbox_vms.stdout'
+    when: vbox_vms.stdout_lines | select('match', '^"' ~ inventory_hostname ~ '"') | list | length > 0
     block:
     - name: Power off
       ansible.builtin.command:

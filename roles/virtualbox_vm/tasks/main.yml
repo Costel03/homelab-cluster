@@ -14,10 +14,14 @@
   register: vbox_running
   changed_when: false
 
+# `list vms` prints '"name" {uuid}' per line. Match the line rather than
+# searching the whole blob for a quoted needle: building that needle through
+# YAML and then Jinja mangles the escapes, and the test silently returns false
+# for a VM that plainly exists.
 - name: Set VM facts
   ansible.builtin.set_fact:
-    vm_exists: '{{ ("\"" ~ vm_name ~ "\"") in vbox_vms.stdout }}'
-    vm_is_running: '{{ ("\"" ~ vm_name ~ "\"") in vbox_running.stdout }}'
+    vm_exists: "{{ vbox_vms.stdout_lines | select('match', '^\"' ~ vm_name ~ '\"') | list | length > 0 }}"
+    vm_is_running: "{{ vbox_running.stdout_lines | select('match', '^\"' ~ vm_name ~ '\"') | list | length > 0 }}"
     vm_mac: "{{ '080027aa%02x%02x' | format(vm_ip.split('.')[2] | int, vm_ip.split('.')[3] | int) }}"
     vm_dir: "{{ vbox_vm_dir }}/{{ vm_name }}"
 

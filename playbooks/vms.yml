@@ -12,17 +12,24 @@
 - name: Create the VirtualBox VMs
   hosts: k8s_nodes
   gather_facts: false
-  # VBoxManage runs on the Windows host, driven from WSL.
-  connection: local
   serial: 1
   vars:
     vm_name: "{{ inventory_hostname }}"
-    vm_ip: "{{ ansible_host }}"
+    vm_ip: "{{ hostvars[inventory_hostname].ansible_host }}"
     vbox_vm_dir: "{{ hostvars['localhost'].vbox_vm_dir }}"
     base_vdi: "{{ hostvars['localhost'].base_vdi }}"
     ssh_public_key: "{{ hostvars['localhost'].homelab_public_key }}"
-  roles:
-  - virtualbox_vm
+  tasks:
+  # VBoxManage runs on the Windows host, so these tasks are delegated rather
+  # than the play being given connection: local. A play-level connection: local
+  # leaves the connection cached as local for these hosts, and every
+  # wait_for_connection in a later play then fails with "timed out waiting for
+  # ping module test" even though SSH is perfectly healthy.
+  - name: Create and start the VM
+    ansible.builtin.include_role:
+      name: virtualbox_vm
+      apply:
+        delegate_to: localhost
 
 - name: Wait for the nodes to answer
   hosts: k8s_nodes
@@ -33,7 +40,7 @@
   # means SSH or the key is wrong.
   - name: Wait for port 22
     ansible.builtin.wait_for:
-      host: "{{ ansible_host }}"
+      host: "{{ hostvars[inventory_hostname].ansible_host }}"
       port: 22
       timeout: 1200
       delay: 10
