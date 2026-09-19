@@ -1,0 +1,35 @@
+---
+- name: Prepare every node
+  hosts: k8s_nodes
+  become: true
+  roles:
+  - k8s_common
+
+- name: Initialise the control plane
+  hosts: masters
+  become: true
+  roles:
+  - k8s_master
+
+- name: Join the workers
+  hosts: workers
+  become: true
+  roles:
+  - k8s_worker
+
+- name: Fetch the kubeconfig
+  hosts: masters
+  tasks:
+  - name: Copy the kubeconfig to the control machine
+    ansible.builtin.fetch:
+      src: "/home/{{ node_user }}/.kube/config"
+      dest: "{{ lookup('env', 'HOME') }}/.kube/config"
+      flat: true
+
+  - name: Point it at the node's routable address
+    delegate_to: localhost
+    become: false
+    ansible.builtin.replace:
+      path: "{{ lookup('env', 'HOME') }}/.kube/config"
+      regexp: 'https://[^:]+:6443'
+      replace: "https://{{ api_advertise_address }}:6443"

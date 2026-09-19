@@ -1,0 +1,53 @@
+---
+- name: Generate the homelab SSH keypair
+  ansible.builtin.command:
+    argv: [ssh-keygen, -t, ed25519, -N, '', -C, homelab, -f, '{{ ssh_key_path }}']
+    creates: "{{ ssh_key_path }}"
+
+- name: Ensure the Windows .ssh directory exists
+  ansible.builtin.file:
+    path: "{{ windows_ssh_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Copy the keypair to Windows
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ windows_ssh_dir }}/{{ item.dest }}"
+    mode: '0600'
+  loop:
+  - { src: "{{ ssh_key_path }}", dest: homelab }
+  - { src: "{{ ssh_key_path }}.pub", dest: homelab.pub }
+  loop_control:
+    label: "{{ item.dest }}"
+  register: windows_key_copy
+
+# NTFS ignores the mode above and inherits ACLs from the parent directory.
+# ssh.exe refuses a private key other accounts can read.
+- name: Restrict the private key's ACL on Windows
+  ansible.builtin.command:
+    argv:
+    - /mnt/c/Windows/System32/icacls.exe
+    - '{{ windows_ssh_dir_win }}\homelab'
+    - /inheritance:r
+    - /grant:r
+    - '{{ windows_user }}:R'
+  when: windows_key_copy.changed
+  changed_when: true
+
+- name: Add the nodes to the Windows SSH config
+  ansible.builtin.blockinfile:
+    path: "{{ windows_ssh_dir }}/config"
+    create: true
+    mode: '0644'
+    marker: "# {mark} homelab-cluster"
+    block: |
+      {% for host in groups['k8s_nodes'] %}
+      Host {{ host }}
+          HostName {{ hostvars[host].ansible_host }}
+          User {{ node_user }}
+          IdentityFile {{ windows_ssh_dir_win }}\homelab
+          StrictHostKeyChecking no
+          UserKnownHostsFile NUL
+
+      {% endfor %}

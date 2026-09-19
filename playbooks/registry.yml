@@ -1,0 +1,7 @@
+---
+- name: Install the Zot registry in WSL
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  roles:
+  - zot_registry

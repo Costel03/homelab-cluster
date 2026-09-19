@@ -1,0 +1,39 @@
+#cloud-config
+hostname: {{ vm_name }}
+fqdn: {{ vm_name }}
+manage_etc_hosts: true
+
+users:
+- name: {{ node_user }}
+  groups: [adm, sudo]
+  shell: /bin/bash
+  lock_passwd: true
+  sudo: "ALL=(ALL) NOPASSWD:ALL"
+  ssh_authorized_keys:
+  - {{ ssh_public_key }}
+
+packages:
+- python3
+- python-is-python3
+
+package_update: true
+
+write_files:
+# Matched by MAC, not interface name: VirtualBox NIC naming varies by chipset,
+# the MAC is pinned when the VM is created.
+- path: /etc/netplan/99-homelab.yaml
+  permissions: '0600'
+  content: |
+    network:
+      version: 2
+      renderer: networkd
+      ethernets:
+        hostonly:
+          match:
+            macaddress: "{{ vm_mac_colons }}"
+          set-name: hostonly
+          addresses: [{{ vm_ip }}/{{ net_prefix }}]
+
+runcmd:
+- [netplan, apply]
+- [swapoff, -a]

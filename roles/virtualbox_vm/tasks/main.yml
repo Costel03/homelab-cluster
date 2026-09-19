@@ -1,0 +1,175 @@
+---
+# Runs once per node, delegated to localhost. vm_name / vm_ip and the sizing
+# vars come from the inventory.
+
+- name: List existing VMs
+  ansible.builtin.command:
+    argv: ['{{ vbox_manage }}', list, vms]
+  register: vbox_vms
+  changed_when: false
+
+- name: List running VMs
+  ansible.builtin.command:
+    argv: ['{{ vbox_manage }}', list, runningvms]
+  register: vbox_running
+  changed_when: false
+
+- name: Set VM facts
+  ansible.builtin.set_fact:
+    vm_exists: '{{ ("\"" ~ vm_name ~ "\"") in vbox_vms.stdout }}'
+    vm_is_running: '{{ ("\"" ~ vm_name ~ "\"") in vbox_running.stdout }}'
+    vm_mac: "{{ '080027aa%02x%02x' | format(vm_ip.split('.')[2] | int, vm_ip.split('.')[3] | int) }}"
+    vm_dir: "{{ vbox_vm_dir }}/{{ vm_name }}"
+
+# VBoxManage is a Windows binary and needs Windows paths. It accepts forward
+# slashes, so translating the /mnt/<drive> prefix is enough.
+- name: Derive the netplan MAC and Windows-format paths
+  ansible.builtin.set_fact:
+    vm_mac_colons: "{{ vm_mac | regex_replace('(..)(?!$)', '\\1:') }}"
+    base_vdi_win: "{{ base_vdi | regex_replace('^/mnt/([a-zA-Z])/', '\\1:/') }}"
+    vm_dir_win: "{{ vm_dir | regex_replace('^/mnt/([a-zA-Z])/', '\\1:/') }}"
+
+- name: Create the VM
+  when: not vm_exists
+  block:
+  - name: Register the VM with VirtualBox
+    ansible.builtin.command:
+      argv: ['{{ vbox_manage }}', createvm, --name, '{{ vm_name }}', --ostype, Ubuntu_64, --register]
+
+  - name: Clone the base disk
+    ansible.builtin.command:
+      argv:
+      - '{{ vbox_manage }}'
+      - clonemedium
+      - disk
+      - "{{ base_vdi_win }}"
+      - "{{ vm_dir_win }}/{{ vm_name }}.vdi"
+      - --format
+      - VDI
+
+  - name: Resize the disk
+    ansible.builtin.command:
+      argv:
+      - '{{ vbox_manage }}'
+      - modifymedium
+      - disk
+      - "{{ vm_dir_win }}/{{ vm_name }}.vdi"
+      - --resize
+      - "{{ vm_disk_gb | int * 1024 }}"
+
+  # Cloning registers the base disk in VirtualBox's media registry; leaving it
+  # there makes the next clone fail with a UUID conflict.
+  - name: Release the base disk from the media registry
+    ansible.builtin.command:
+      argv: ['{{ vbox_manage }}', closemedium, disk, '{{ base_vdi_win }}']
+    failed_when: false
+
+  - name: Render the cloud-init files
+    ansible.builtin.template:
+      src: "{{ item }}.j2"
+      dest: "{{ image_cache_dir }}/{{ item }}"
+      mode: '0644'
+    loop: [user-data, meta-data]
+
+  - name: Build the seed ISO
+    ansible.builtin.command:
+      argv:
+      - cloud-localds
+      - "{{ image_cache_dir }}/{{ vm_name }}-seed.iso"
+      - "{{ image_cache_dir }}/user-data"
+      - "{{ image_cache_dir }}/meta-data"
+
+  - name: Place the seed ISO next to the VM
+    ansible.builtin.copy:
+      src: "{{ image_cache_dir }}/{{ vm_name }}-seed.iso"
+      dest: "{{ vm_dir }}/seed.iso"
+      mode: '0644'
+
+  - name: Configure CPU, memory and networking
+    ansible.builtin.command:
+      argv:
+      - '{{ vbox_manage }}'
+      - modifyvm
+      - '{{ vm_name }}'
+      - --memory
+      - "{{ vm_memory_mb }}"
+      - --cpus
+      - "{{ vm_cpus }}"
+      - --paravirtprovider
+      - hyperv
+      - --nested-hw-virt
+      - 'on'
+      - --graphicscontroller
+      - vmsvga
+      - --vram
+      - '16'
+      - --boot1
+      - disk
+      - --boot2
+      - none
+      - --boot3
+      - none
+      - --boot4
+      - none
+      - --nic1
+      - nat
+      - --nic2
+      - hostonly
+      - --hostonlyadapter2
+      - '{{ vbox_hostonly_adapter }}'
+      - --macaddress2
+      - '{{ vm_mac }}'
+
+  - name: Add a SATA controller
+    ansible.builtin.command:
+      argv:
+      - '{{ vbox_manage }}'
+      - storagectl
+      - '{{ vm_name }}'
+      - --name
+      - SATA
+      - --add
+      - sata
+      - --controller
+      - IntelAhci
+      - --portcount
+      - '2'
+
+  - name: Attach the disk
+    ansible.builtin.command:
+      argv:
+      - '{{ vbox_manage }}'
+      - storageattach
+      - '{{ vm_name }}'
+      - --storagectl
+      - SATA
+      - --port
+      - '0'
+      - --device
+      - '0'
+      - --type
+      - hdd
+      - --medium
+      - "{{ vm_dir_win }}/{{ vm_name }}.vdi"
+
+  - name: Attach the seed ISO
+    ansible.builtin.command:
+      argv:
+      - '{{ vbox_manage }}'
+      - storageattach
+      - '{{ vm_name }}'
+      - --storagectl
+      - SATA
+      - --port
+      - '1'
+      - --device
+      - '0'
+      - --type
+      - dvddrive
+      - --medium
+      - "{{ vm_dir_win }}/seed.iso"
+
+- name: Start the VM
+  ansible.builtin.command:
+    argv: ['{{ vbox_manage }}', startvm, '{{ vm_name }}', --type, headless]
+  when: not vm_is_running

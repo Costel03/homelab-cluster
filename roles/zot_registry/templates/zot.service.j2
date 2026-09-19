@@ -1,0 +1,21 @@
+[Unit]
+Description=Zot OCI registry (homelab pull-through cache)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zot
+Group=zot
+ExecStart=/usr/local/bin/zot serve /etc/zot/config.json
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/zot
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,42 @@
+---
+- name: Create the VirtualBox VMs
+  hosts: k8s_nodes
+  gather_facts: false
+  # VBoxManage runs on the Windows host, driven from WSL.
+  connection: local
+  serial: 1
+  vars:
+    vm_name: "{{ inventory_hostname }}"
+    vm_ip: "{{ ansible_host }}"
+  tasks:
+  - name: Prepare the host once
+    ansible.builtin.include_role:
+      name: "{{ item }}"
+    loop: [ssh_keys, vm_image]
+    run_once: true
+
+  - name: Read the generated public key
+    ansible.builtin.slurp:
+      src: "{{ ssh_key_path }}.pub"
+    register: pubkey_raw
+    run_once: true
+
+  - name: Publish the public key to every node
+    ansible.builtin.set_fact:
+      ssh_public_key: "{{ pubkey_raw.content | b64decode | trim }}"
+
+  - name: Create and start the VM
+    ansible.builtin.include_role:
+      name: virtualbox_vm
+
+- name: Wait for the nodes to answer
+  hosts: k8s_nodes
+  gather_facts: false
+  tasks:
+  - name: Wait for SSH (cloud-init runs on first boot)
+    ansible.builtin.wait_for_connection:
+      timeout: 600
+      delay: 15
+
+  - name: Gather facts now that the node is up
+    ansible.builtin.setup:

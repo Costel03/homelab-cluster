@@ -1,0 +1,6 @@
+---
+# Tainted, so no workloads land here. 2 CPUs is kubeadm's hard minimum.
+vm_cpus: 4
+vm_memory_mb: 4096
+vm_disk_gb: 50
+node_role: master

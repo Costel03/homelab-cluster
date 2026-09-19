@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: app-of-apps
+  namespace: argocd
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: {{ gitops_repo_url }}
+    targetRevision: {{ gitops_repo_revision }}
+    path: app-of-apps
+    helm:
+      valueFiles:
+      - values.yaml
+      parameters:
+      - name: repo.url
+        value: {{ gitops_repo_url }}
+      - name: repo.revision
+        value: {{ gitops_repo_revision }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true

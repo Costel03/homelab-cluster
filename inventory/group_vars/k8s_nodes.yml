@@ -1,0 +1,4 @@
+---
+ansible_user: "{{ node_user }}"
+ansible_ssh_private_key_file: "{{ ssh_key_path }}"
+ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null

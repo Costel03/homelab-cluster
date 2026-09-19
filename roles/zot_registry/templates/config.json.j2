@@ -1,0 +1,35 @@
+{
+  "distSpecVersion": "1.1.0",
+  "storage": {
+    "rootDirectory": "/var/lib/zot",
+    "gc": true,
+    "gcDelay": "1h",
+    "dedupe": true
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "{{ registry_port }}"
+  },
+  "log": {
+    "level": "info"
+  },
+  "extensions": {
+    "search": { "enable": true },
+    "ui": { "enable": true },
+    "sync": {
+      "enable": true,
+      "registries": [
+{% for reg in mirrored_registries %}
+        {
+          "urls": ["{{ reg.upstream }}"],
+          "content": [{ "prefix": "**" }],
+          "onDemand": true,
+          "tlsVerify": true,
+          "maxRetries": 3,
+          "retryDelay": "5s"
+        }{{ "," if not loop.last }}
+{% endfor %}
+      ]
+    }
+  }
+}

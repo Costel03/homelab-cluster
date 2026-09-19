@@ -1,0 +1,39 @@
+---
+# Deletes the VMs and their disks. The cached base image is kept so the next
+# run does not re-download it.
+#
+#   ansible-playbook playbooks/destroy.yml -e confirm_destroy=yes
+- name: Destroy the cluster VMs
+  hosts: k8s_nodes
+  gather_facts: false
+  connection: local
+  serial: 1
+  tasks:
+  - name: Refuse to run without confirmation
+    ansible.builtin.assert:
+      that: confirm_destroy | default('') == 'yes'
+      fail_msg: "Re-run with -e confirm_destroy=yes — this deletes the VMs and their disks."
+    run_once: true
+
+  - name: List existing VMs
+    ansible.builtin.command:
+      argv: ['{{ vbox_manage }}', list, vms]
+    register: vbox_vms
+    changed_when: false
+
+  - name: Power off and delete the VM
+    when: '("\"" ~ inventory_hostname ~ "\"") in vbox_vms.stdout'
+    block:
+    - name: Power off
+      ansible.builtin.command:
+        argv: ['{{ vbox_manage }}', controlvm, '{{ inventory_hostname }}', poweroff]
+      failed_when: false
+
+    # VirtualBox needs a moment to release the disk lock.
+    - name: Wait for the lock to clear
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Unregister and delete
+      ansible.builtin.command:
+        argv: ['{{ vbox_manage }}', unregistervm, '{{ inventory_hostname }}', --delete]

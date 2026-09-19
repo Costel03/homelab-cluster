@@ -1,0 +1,280 @@
+---
+- name: Create swap file (4GB) on master to prevent OOM
+  command: fallocate -l 4G /swapfile
+  args:
+    creates: /swapfile
+
+- name: Set swap file permissions
+  file:
+    path: /swapfile
+    mode: '0600'
+
+- name: Format swap file
+  command: mkswap /swapfile
+  args:
+    creates: /proc/swaps # not ideal but mkswap is safe to run again
+  changed_when: false
+
+- name: Enable swap
+  command: swapon /swapfile
+  changed_when: false
+  failed_when: false
+
+- name: Persist swap in fstab
+  lineinfile:
+    path: /etc/fstab
+    line: '/swapfile none swap sw 0 0'
+    state: present
+
+- name: Configure kubelet to tolerate swap (master uses swap for OOM protection)
+  copy:
+    dest: /etc/default/kubelet
+    content: "KUBELET_EXTRA_ARGS=--fail-swap-on=false\n"
+    mode: '0644'
+  become: true
+
+- name: Check if Kubernetes is already initialized
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: kubeadm_config
+
+# If admin.conf was written by a previously failed kubeadm init (e.g. the
+# API server never became healthy so RBAC bootstrap never completed), we
+# must treat it as uninitialized and run a full reset + reinit.
+- name: Verify control plane RBAC is healthy (requires working admin bootstrap)
+  shell: kubectl get nodes --request-timeout=15s
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: k8s_health
+  failed_when: false
+  changed_when: false
+  when: kubeadm_config.stat.exists
+
+- name: Remove stale admin.conf if cluster is unhealthy (triggers full re-init)
+  file:
+    path: /etc/kubernetes/admin.conf
+    state: absent
+  when: kubeadm_config.stat.exists and (k8s_health.rc is defined and k8s_health.rc != 0)
+
+- name: Recheck initialization state after health verification
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: kubeadm_config
+
+- name: Restart containerd to ensure it's running
+  systemd:
+    name: containerd
+    state: restarted
+    enabled: true
+
+- name: Wait for containerd socket to be ready
+  wait_for:
+    path: /run/containerd/containerd.sock
+    state: present
+    timeout: 60
+
+- name: Reset any partial kubeadm state before init
+  become: true
+  shell: |
+    kubeadm reset -f
+    rm -rf /etc/kubernetes/manifests /etc/kubernetes/pki /var/lib/etcd
+  when: not kubeadm_config.stat.exists
+  ignore_errors: true
+
+- name: Kill any lingering control-plane processes after reset
+  become: true
+  shell: |
+    # /proc/<pid>/comm is capped at 15 chars — use truncated names.
+    # Do NOT use pkill -f: it matches the full cmdline including the
+    # text of this shell script, which would kill the Ansible runner.
+    pkill -9 kube-apiserver  2>/dev/null || true
+    pkill -9 kube-scheduler  2>/dev/null || true
+    pkill -9 kube-controller 2>/dev/null || true  # kube-controller-manager truncated to 15 chars
+    pkill -9 etcd            2>/dev/null || true
+  when: not kubeadm_config.stat.exists
+
+- name: Wait for control-plane ports to be free after reset
+  wait_for:
+    port: "{{ item }}"
+    state: stopped
+    timeout: 60
+    delay: 2
+  loop:
+  - 6443 # kube-apiserver
+  - 10257 # kube-controller-manager
+  - 10259 # kube-scheduler
+  - 2379 # etcd client
+  - 2380 # etcd peer
+  when: not kubeadm_config.stat.exists
+
+- name: Wait for the host-only interface to get its address
+  shell: ip addr show | grep -c '{{ api_advertise_address }}'
+  register: iface_check
+  until: iface_check.rc == 0 and iface_check.stdout | int > 0
+  retries: 24
+  delay: 5
+  when: not kubeadm_config.stat.exists
+
+- name: Get installed kubeadm version
+  command: kubeadm version -o short
+  register: kubeadm_ver
+  when: not kubeadm_config.stat.exists
+
+- name: Write kubeadm init config
+  become: true
+  copy:
+    dest: /tmp/kubeadm-init-config.yaml
+    mode: '0644'
+    content: |
+      apiVersion: kubeadm.k8s.io/v1beta4
+      kind: InitConfiguration
+      localAPIEndpoint:
+        advertiseAddress: {{ api_advertise_address }}
+        bindPort: 6443
+      nodeRegistration:
+        criSocket: unix:///run/containerd/containerd.sock
+      ---
+      apiVersion: kubeadm.k8s.io/v1beta4
+      kind: ClusterConfiguration
+      kubernetesVersion: {{ kubeadm_ver.stdout | trim }}
+      networking:
+        podSubnet: {{ pod_subnet }}
+      ---
+      apiVersion: kubelet.config.k8s.io/v1beta1
+      kind: KubeletConfiguration
+      failSwapOn: false
+  when: not kubeadm_config.stat.exists
+
+# Pre-pull images before init so the 20m health-check timer isn't eaten
+# by image downloads through the (not-yet-running) zot.local mirror.
+- name: Pre-pull kubeadm control-plane images
+  become: true
+  command: kubeadm config images pull --config /tmp/kubeadm-init-config.yaml
+  retries: 3
+  delay: 10
+  register: image_pull_result
+  until: image_pull_result.rc == 0
+  when: not kubeadm_config.stat.exists
+
+- name: Initialize Kubernetes control plane
+  become: true
+  shell: |
+    set -o pipefail
+    kubeadm init --config /tmp/kubeadm-init-config.yaml | tee /root/kubeadm-init.out
+  args:
+    executable: /bin/bash
+  when: not kubeadm_config.stat.exists
+
+- name: Enable and start kubelet (just in case)
+  systemd:
+    name: kubelet
+    enabled: yes
+    state: started
+
+- name: Create .kube directory for the node user
+  file:
+    path: /home/{{ node_user }}/.kube
+    state: directory
+    owner: "{{ node_user }}"
+    group: "{{ node_user }}"
+    mode: '0755'
+
+- name: Copy kubeconfig to the node user
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/{{ node_user }}/.kube/config
+    remote_src: yes
+    owner: "{{ node_user }}"
+    group: "{{ node_user }}"
+    mode: '0600'
+
+- name: Check if Calico is already installed
+  command: kubectl get daemonset calico-node -n kube-system
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: calico_status
+  failed_when: false
+  changed_when: false
+
+- name: Download Calico manifest to control machine
+  delegate_to: localhost
+  become: false
+  get_url:
+    url: https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico.yaml
+    dest: /tmp/calico.yaml
+    mode: '0644'
+    force: false
+  when: calico_status.rc != 0
+
+- name: Copy Calico manifest to master
+  copy:
+    src: /tmp/calico.yaml
+    dest: /tmp/calico.yaml
+    mode: '0644'
+  when: calico_status.rc != 0
+
+- name: Apply Calico CNI
+  shell: |
+    kubectl apply -f /tmp/calico.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: calico_apply
+  until: calico_apply.rc == 0
+  retries: 12
+  delay: 30
+  when: calico_status.rc != 0
+
+- name: Set Calico IP autodetection and pod CIDR (avoids kubeadm-config API query on startup)
+  shell: |
+    kubectl -n kube-system set env daemonset/calico-node \
+      IP_AUTODETECTION_METHOD=cidr={{ cluster_cidr }} \
+      CALICO_IPV4POOL_CIDR={{ pod_subnet }}
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Save kubeadm join command
+  shell: |
+    kubeadm token create --print-join-command > /home/{{ node_user }}/kubeadm-join.sh
+  args:
+    creates: /home/{{ node_user }}/kubeadm-join.sh
+
+- name: Make join script executable
+  file:
+    path: /home/{{ node_user }}/kubeadm-join.sh
+    mode: '0755'
+    owner: "{{ node_user }}"
+    group: "{{ node_user }}"
+
+# ---------------------------------------------------------------------
+# NFS Server — exports /share for the nfs-subdir-external-provisioner
+# ---------------------------------------------------------------------
+
+- name: Install nfs-kernel-server
+  apt:
+    name: nfs-kernel-server
+    state: present
+    update_cache: yes
+
+- name: Create /share export directory
+  file:
+    path: /share
+    state: directory
+    owner: nobody
+    group: nogroup
+    mode: '0777'
+
+- name: Export /share via NFS to cluster subnet
+  lineinfile:
+    path: /etc/exports
+    line: '/share {{ cluster_cidr }}(rw,sync,no_subtree_check,no_root_squash)'
+    regexp: '^/share'
+    state: present
+
+- name: Enable and start nfs-kernel-server
+  systemd:
+    name: nfs-kernel-server
+    state: started
+    enabled: true
+
+- name: Re-export NFS shares
+  command: exportfs -ra

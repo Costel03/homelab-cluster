@@ -1,0 +1,81 @@
+---
+- name: Reset kubeadm on the worker node (safe retry setup)
+  become: true
+  command: kubeadm reset -f
+  ignore_errors: true
+
+- name: Delete stale node object from API server (allows clean re-join)
+  delegate_to: master
+  become: true
+  shell: |
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf \
+      delete node {{ inventory_hostname }} --ignore-not-found=true
+  changed_when: false
+
+- name: Remove old CNI configuration (for a clean state)
+  become: true
+  file:
+    path: /etc/cni/net.d
+    state: absent
+
+- name: Stop containerd to wipe stale linked-clone state
+  become: true
+  systemd:
+    name: containerd
+    state: stopped
+
+- name: Wipe containerd state database (removes stale clone artifacts)
+  become: true
+  file:
+    path: /var/lib/containerd
+    state: absent
+
+- name: Start containerd with clean state
+  become: true
+  systemd:
+    name: containerd
+    state: started
+    enabled: true
+
+- name: Wait for kubeadm join script to be created on master
+  delegate_to: master
+  wait_for:
+    path: /home/{{ node_user }}/kubeadm-join.sh
+    state: present
+    timeout: 300
+
+- name: Fetch kubeadm join script from master
+  delegate_to: master
+  fetch:
+    src: /home/{{ node_user }}/kubeadm-join.sh
+    dest: /tmp/kubeadm-join.sh
+    flat: yes
+
+- name: Copy kubeadm join script to worker node
+  become: true
+  copy:
+    src: /tmp/kubeadm-join.sh
+    dest: /home/{{ node_user }}/kubeadm-join.sh
+    mode: '0755'
+    owner: "{{ node_user }}"
+    group: "{{ node_user }}"
+
+- name: Join Kubernetes cluster
+  become: true
+  command: bash /home/{{ node_user }}/kubeadm-join.sh
+  args:
+    creates: /etc/kubernetes/kubelet.conf
+
+- name: Wait for kubelet to register this node with the control plane
+  become: true
+  wait_for:
+    path: /etc/kubernetes/kubelet.conf
+    timeout: 60
+
+- name: Create .kube directory for the node user
+  file:
+    path: /home/{{ node_user }}/.kube
+    state: directory
+    mode: '0755'
+    owner: "{{ node_user }}"
+    group: "{{ node_user }}"

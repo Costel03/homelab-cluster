@@ -1,0 +1,273 @@
+---
+# Runs against a stock Ubuntu cloud image: cloud-init only creates the user and
+# the static IP, so everything below — containerd, the Kubernetes packages,
+# sysctl, kernel modules, registry mirrors — is installed here on first run.
+# There is no pre-baked base image any more; the cached VDI in up.sh is the
+# unmodified upstream cloud image.
+
+- name: Ensure nfs-common is installed
+  apt:
+    name:
+    - nfs-common
+    state: present
+    update_cache: yes
+
+- name: Disable swap at runtime
+  command: swapoff -a
+  become: true
+
+- name: Remove swap entry from fstab (prevents swap re-enabling on reboot)
+  replace:
+    path: /etc/fstab
+    regexp: '^([^#].*\sswap\s.*)$'
+    replace: '# \1'
+  become: true
+
+- name: Load overlay kernel module
+  modprobe:
+    name: overlay
+    state: present
+
+- name: Load br_netfilter kernel module
+  modprobe:
+    name: br_netfilter
+    state: present
+
+- name: Write Kubernetes sysctl config
+  copy:
+    dest: /etc/sysctl.d/kubernetes.conf
+    content: |
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.bridge.bridge-nf-call-iptables  = 1
+      net.ipv4.ip_forward                 = 1
+    mode: '0644'
+  become: true
+
+- name: Reload sysctl
+  command: sysctl --system
+  become: true
+
+# ── Container runtime + Kubernetes packages ──────────────────────────────────
+- name: Kill unattended-upgrades to release apt lock
+  shell: |
+    systemctl stop unattended-upgrades 2>/dev/null || true
+    systemctl disable unattended-upgrades 2>/dev/null || true
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 2; done
+  become: true
+
+- name: Create apt keyrings directory
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Download Docker apt signing key
+  get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /tmp/docker.gpg
+    mode: '0644'
+    force: false
+  become: true
+
+- name: Dearmor Docker apt signing key
+  shell: gpg --dearmor < /tmp/docker.gpg > /etc/apt/keyrings/docker.gpg
+  args:
+    creates: /etc/apt/keyrings/docker.gpg
+  become: true
+
+- name: Add Docker apt repository
+  copy:
+    dest: /etc/apt/sources.list.d/docker.list
+    content: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable\n"
+    mode: '0644'
+  become: true
+
+- name: Download Kubernetes apt signing key
+  get_url:
+    url: https://pkgs.k8s.io/core:/stable:/{{ kubernetes_series }}/deb/Release.key
+    dest: /tmp/kubernetes.gpg
+    mode: '0644'
+    force: false
+  become: true
+
+- name: Dearmor Kubernetes apt signing key
+  shell: gpg --dearmor < /tmp/kubernetes.gpg > /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  args:
+    creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  become: true
+
+- name: Add Kubernetes apt repository
+  copy:
+    dest: /etc/apt/sources.list.d/kubernetes.list
+    content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/{{ kubernetes_series }}/deb/ /\n"
+    mode: '0644'
+  become: true
+
+- name: Install containerd.io and Kubernetes packages
+  apt:
+    name:
+    - containerd.io
+    - kubelet
+    - kubeadm
+    - kubectl
+    state: present
+    update_cache: yes
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  become: true
+
+- name: Hold Kubernetes packages at current version
+  dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  become: true
+  loop:
+  - kubelet
+  - kubeadm
+  - kubectl
+
+- name: Generate default containerd config (always overwrite to ensure CRI is enabled)
+  shell: containerd config default > /etc/containerd/config.toml
+  become: true
+
+- name: Configure containerd SystemdCgroup
+  replace:
+    path: /etc/containerd/config.toml
+    regexp: 'SystemdCgroup = false'
+    replace: 'SystemdCgroup = true'
+  become: true
+
+- name: Configure containerd sandbox_image
+  replace:
+    path: /etc/containerd/config.toml
+    regexp: 'sandbox_image = ".*"'
+    replace: 'sandbox_image = "registry.k8s.io/pause:3.10.1"'
+  become: true
+
+- name: Write crictl config
+  copy:
+    dest: /etc/crictl.yaml
+    content: |
+      runtime-endpoint: unix:///run/containerd/containerd.sock
+      image-endpoint: unix:///run/containerd/containerd.sock
+      timeout: 10
+      debug: false
+    mode: '0644'
+  become: true
+
+# Wipe containerd state from the linked-clone base image so each node
+# starts with a clean runtime (no stale container name conflicts).
+- name: Stop containerd before wiping state
+  systemd:
+    name: containerd
+    state: stopped
+  ignore_errors: true
+
+- name: Wipe containerd state database
+  file:
+    path: /var/lib/containerd
+    state: absent
+  become: true
+
+- name: Reexec systemd
+  command: systemctl daemon-reexec
+  become: true
+
+# ── Container registry mirrors ───────────────────────────────────────────────
+# Enable certs.d so containerd uses per-registry hosts.toml files.
+# Containerd falls back to the original registry if the mirror is unreachable.
+- name: Enable containerd registry config_path for certs.d
+  replace:
+    path: /etc/containerd/config.toml
+    regexp: 'config_path = ""'
+    replace: 'config_path = "/etc/containerd/certs.d"'
+  become: true
+
+- name: Create containerd certs.d registry directories
+  file:
+    path: "/etc/containerd/certs.d/{{ item.name }}"
+    state: directory
+    mode: '0755'
+  become: true
+  loop: "{{ mirrored_registries }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# Plain HTTP: the registry is reachable only over the host-only network, and
+# using TLS here would mean distributing the homelab CA to every node before
+# the first image pull — which is the bootstrap circle this whole move exists
+# to break.
+- name: Configure containerd mirrors through the host registry
+  copy:
+    dest: "/etc/containerd/certs.d/{{ item.name }}/hosts.toml"
+    mode: '0644'
+    content: |
+      server = "{{ item.upstream }}"
+
+      [host."http://{{ host_ip }}:{{ registry_port }}"]
+        capabilities = ["pull", "resolve"]
+  become: true
+  loop: "{{ mirrored_registries }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# Lets image references written against the registry directly (rather than
+# through a mirrored upstream) resolve without TLS.
+- name: Create certs.d directory for the host registry itself
+  file:
+    path: "/etc/containerd/certs.d/{{ host_ip }}:{{ registry_port }}"
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Allow insecure pushes and pulls direct to the host registry
+  copy:
+    dest: /etc/containerd/certs.d/{{ host_ip }}:{{ registry_port }}/hosts.toml
+    mode: '0644'
+    content: |
+      server = "http://{{ host_ip }}:{{ registry_port }}"
+
+      [host."http://{{ host_ip }}:{{ registry_port }}"]
+        capabilities = ["pull", "resolve", "push"]
+  become: true
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: Restart and enable containerd
+  systemd:
+    name: containerd
+    state: restarted
+    enabled: true
+
+- name: Install wait-for-hostonly systemd service (ensures the host-only NIC is up before kubelet)
+  copy:
+    dest: /etc/systemd/system/wait-for-hostonly.service
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Wait for the host-only NIC to be ready
+      Before=kubelet.service
+      After=network.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/bash -c 'until ip -4 addr show hostonly | grep -q inet; do sleep 2; done'
+      TimeoutSec=60
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+  become: true
+
+- name: Enable wait-for-hostonly service
+  systemd:
+    name: wait-for-hostonly.service
+    enabled: true
+    daemon_reload: true
+  become: true
+
+- name: Enable and start kubelet
+  systemd:
+    name: kubelet
+    enabled: yes
+    state: started

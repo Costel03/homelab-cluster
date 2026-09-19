@@ -1,0 +1,7 @@
+---
+- name: Bootstrap MetalLB, ArgoCD and the app-of-apps
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  roles:
+  - argocd_bootstrap

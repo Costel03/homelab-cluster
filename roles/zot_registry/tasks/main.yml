@@ -1,0 +1,125 @@
+---
+# Zot runs on the host, not in the cluster: an in-cluster registry cannot serve
+# the images needed to start itself, so it would never help a cold rebuild.
+
+- name: Locate the port-forwarding script in Windows terms
+  ansible.builtin.set_fact:
+    portproxy_script_win: >-
+      {{ (role_path ~ '/files/publish-to-hostonly.ps1')
+         | regex_replace('^/mnt/([a-zA-Z])/', '\1:/') }}
+
+- name: Confirm systemd is PID 1 in this WSL distro
+  ansible.builtin.command: ps -p 1 -o comm=
+  register: wsl_init
+  changed_when: false
+  failed_when: wsl_init.stdout | trim != 'systemd'
+
+- name: Install the zot binary
+  ansible.builtin.get_url:
+    url: "https://github.com/project-zot/zot/releases/download/{{ zot_version }}/zot-linux-amd64"
+    dest: /usr/local/bin/zot
+    mode: '0755'
+  become: true
+  notify: Restart zot
+
+- name: Create the zot system user
+  ansible.builtin.user:
+    name: zot
+    system: true
+    home: /var/lib/zot
+    shell: /usr/sbin/nologin
+    create_home: false
+  become: true
+
+- name: Create the zot directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.owner | default('root') }}"
+    mode: '0755'
+  become: true
+  loop:
+  - { path: /var/lib/zot, owner: zot }
+  - { path: /etc/zot }
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Write the zot config
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: /etc/zot/config.json
+    mode: '0644'
+  become: true
+  notify: Restart zot
+
+- name: Install the systemd unit
+  ansible.builtin.template:
+    src: zot.service.j2
+    dest: /etc/systemd/system/zot.service
+    mode: '0644'
+  become: true
+  notify: Restart zot
+
+- name: Enable and start zot
+  ansible.builtin.systemd:
+    name: zot
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+
+- name: Wait for zot to answer
+  ansible.builtin.uri:
+    url: "http://localhost:{{ registry_port }}/v2/"
+    status_code: [200, 401]
+  register: zot_probe
+  retries: 10
+  delay: 3
+  until: zot_probe is succeeded
+
+# WSL is NAT'd, so VMs on the host-only network cannot reach it directly.
+# WSL changes address on every restart, so the forwarding has to be refreshed
+# rather than set up once.
+- name: Check whether the registry is already reachable on the host-only address
+  ansible.builtin.uri:
+    url: "http://{{ host_ip }}:{{ registry_port }}/v2/"
+    status_code: [200, 401]
+    timeout: 5
+  register: hostonly_probe
+  failed_when: false
+
+- name: Refresh the Windows port forwarding
+  when: hostonly_probe.status is not defined or hostonly_probe.status not in [200, 401]
+  block:
+  - name: Read the current WSL address
+    ansible.builtin.shell:
+      cmd: set -o pipefail && ip -4 -o addr show eth0 | awk '{print $4}' | cut -d/ -f1
+      executable: /bin/bash
+    register: wsl_ip
+    changed_when: false
+
+  # Triggers a UAC prompt — netsh portproxy and the firewall rule both need
+  # Administrator, and WSL cannot elevate on its own.
+  - name: Forward the host-only address to WSL (accept the UAC prompt)
+    ansible.builtin.command:
+      argv:
+      - /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+      - -NoProfile
+      - -Command
+      - >-
+        Start-Process powershell -Verb RunAs -Wait -ArgumentList
+        @('-NoProfile','-ExecutionPolicy','Bypass','-File','{{ portproxy_script_win }}',
+        '-WslIp','{{ wsl_ip.stdout | trim }}',
+        '-Port','{{ registry_port }}',
+        '-HostOnlyIp','{{ host_ip }}')
+    changed_when: true
+
+  - name: Verify the registry is now reachable from the host-only address
+    ansible.builtin.uri:
+      url: "http://{{ host_ip }}:{{ registry_port }}/v2/"
+      status_code: [200, 401]
+    register: zot_hostonly
+    retries: 5
+    delay: 3
+    until: zot_hostonly is succeeded

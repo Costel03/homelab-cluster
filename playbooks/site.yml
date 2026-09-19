@@ -1,0 +1,7 @@
+---
+# Everything, in order. Individual stages can be run on their own —
+# see the README.
+- ansible.builtin.import_playbook: registry.yml
+- ansible.builtin.import_playbook: vms.yml
+- ansible.builtin.import_playbook: cluster.yml
+- ansible.builtin.import_playbook: apps.yml

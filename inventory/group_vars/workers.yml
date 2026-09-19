@@ -1,0 +1,6 @@
+---
+# 1:2 CPU:GB — this stack runs out of memory long before CPU.
+vm_cpus: 4
+vm_memory_mb: 8192
+vm_disk_gb: 50
+node_role: worker

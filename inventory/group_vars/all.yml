@@ -1,0 +1,42 @@
+---
+node_user: ubuntu
+ssh_key_path: "{{ lookup('env', 'HOME') }}/.ssh/homelab"
+# Keys are copied here so ssh and VS Code work from PowerShell too.
+windows_user: iacob
+windows_ssh_dir: "/mnt/c/Users/{{ windows_user }}/.ssh"
+windows_ssh_dir_win: 'C:\Users\{{ windows_user }}\.ssh'
+
+vbox_manage: /mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe
+# Must be the adapter holding host_ip — check `VBoxManage list hostonlyifs`.
+vbox_hostonly_adapter: "VirtualBox Host-Only Ethernet Adapter #2"
+
+host_ip: 192.168.56.1
+cluster_cidr: 192.168.56.0/24
+net_prefix: 24
+pod_subnet: 10.244.0.0/16
+api_advertise_address: 192.168.56.10
+
+registry_port: 5000
+zot_version: v2.1.21
+mirrored_registries:
+- name: docker.io
+  upstream: https://registry-1.docker.io
+- name: ghcr.io
+  upstream: https://ghcr.io
+- name: quay.io
+  upstream: https://quay.io
+- name: registry.k8s.io
+  upstream: https://registry.k8s.io
+
+kubernetes_series: v1.35
+calico_version: v3.29.1
+
+cloud_image_url: https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img
+cloud_image_checksums: https://cloud-images.ubuntu.com/releases/26.04/release/SHA256SUMS
+image_cache_dir: "{{ lookup('env', 'HOME') }}/.cache/homelab-cluster"
+
+argocd_chart_version: 10.9.2
+metallb_chart_version: 0.15.3
+metallb_pool: 192.168.56.20-192.168.56.40
+gitops_repo_url: https://github.com/Costel03/homelab-gitops.git
+gitops_repo_revision: main

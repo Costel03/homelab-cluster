@@ -1,0 +1,62 @@
+---
+# MetalLB and ArgoCD are installed here rather than by ArgoCD itself: ArgoCD's
+# Service is a LoadBalancer, so it stays Pending until MetalLB exists, and
+# ArgoCD cannot install itself. Everything else is declared in homelab-gitops
+# and reconciled from there.
+
+- name: Install MetalLB
+  kubernetes.core.helm:
+    name: metallb
+    chart_ref: metallb
+    chart_repo_url: https://metallb.github.io/metallb
+    chart_version: "{{ metallb_chart_version }}"
+    release_namespace: metallb-system
+    create_namespace: true
+    wait: true
+    wait_timeout: 10m
+
+- name: Render the MetalLB address pool
+  ansible.builtin.template:
+    src: metallb-resources.yaml.j2
+    dest: /tmp/metallb-resources.yaml
+    mode: '0644'
+
+# The pool and advertisement are plain CRs, so they can only be applied once
+# MetalLB's CRDs are established.
+- name: Wait for the MetalLB CRDs
+  ansible.builtin.command:
+    argv: [kubectl, wait, --for, condition=Established, crd/ipaddresspools.metallb.io, --timeout=120s]
+  changed_when: false
+
+- name: Apply the MetalLB address pool
+  kubernetes.core.k8s:
+    src: /tmp/metallb-resources.yaml
+    state: present
+
+- name: Install ArgoCD
+  kubernetes.core.helm:
+    name: argocd
+    chart_ref: argo-cd
+    chart_repo_url: https://argoproj.github.io/argo-helm
+    chart_version: "{{ argocd_chart_version }}"
+    release_namespace: argocd
+    create_namespace: true
+    values: "{{ argocd_values }}"
+    wait: true
+    wait_timeout: 10m
+
+- name: Wait for the Application CRD
+  ansible.builtin.command:
+    argv: [kubectl, wait, --for, condition=Established, crd/applications.argoproj.io, --timeout=120s]
+  changed_when: false
+
+- name: Render the app-of-apps
+  ansible.builtin.template:
+    src: app-of-apps.yaml.j2
+    dest: /tmp/app-of-apps.yaml
+    mode: '0644'
+
+- name: Hand the rest of the cluster to ArgoCD
+  kubernetes.core.k8s:
+    src: /tmp/app-of-apps.yaml
+    state: present
