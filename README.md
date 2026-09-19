@@ -102,9 +102,12 @@ after `wsl --shutdown`.
 WSL Ubuntu with systemd, plus:
 
 ```bash
-sudo apt-get install -y qemu-utils cloud-image-utils make
+sudo apt-get install -y qemu-utils cloud-image-utils make python3-kubernetes
 ansible-galaxy collection install -r requirements.yml
 ```
+
+`python3-kubernetes` is the Python library behind the `kubernetes.core` modules —
+the collection alone is not enough, and the apps stage fails without it.
 
 VirtualBox 7.x on Windows with a host-only adapter holding `192.168.56.1`.
 Confirm which one that is and set `vbox_hostonly_adapter` in

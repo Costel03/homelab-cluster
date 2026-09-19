@@ -266,6 +266,18 @@
     daemon_reload: true
   become: true
 
+# Without --node-ip kubelet registers the NAT interface, which is 10.0.2.15 on
+# every VM. All three nodes then report the same InternalIP and the apiserver
+# reaches the wrong kubelet for logs, exec and metrics.
+- name: Register kubelet against the host-only address
+  copy:
+    dest: /etc/default/kubelet
+    content: |
+      KUBELET_EXTRA_ARGS=--node-ip={{ hostvars[inventory_hostname].ansible_host }}{{ ' --fail-swap-on=false' if node_role == 'master' else '' }}
+    mode: '0644'
+  become: true
+  notify: Restart kubelet
+
 - name: Enable and start kubelet
   systemd:
     name: kubelet

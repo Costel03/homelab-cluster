@@ -26,13 +26,6 @@
     line: '/swapfile none swap sw 0 0'
     state: present
 
-- name: Configure kubelet to tolerate swap (master uses swap for OOM protection)
-  copy:
-    dest: /etc/default/kubelet
-    content: "KUBELET_EXTRA_ARGS=--fail-swap-on=false\n"
-    mode: '0644'
-  become: true
-
 - name: Check if Kubernetes is already initialized
   stat:
     path: /etc/kubernetes/admin.conf
