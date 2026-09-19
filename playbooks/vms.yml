@@ -28,10 +28,20 @@
   hosts: k8s_nodes
   gather_facts: false
   tasks:
-  - name: Wait for SSH (cloud-init runs on first boot)
+  # Two stages so a failure says which half broke: no port means the VM did
+  # not boot or cloud-init never brought the NIC up; port but no connection
+  # means SSH or the key is wrong.
+  - name: Wait for port 22
+    ansible.builtin.wait_for:
+      host: "{{ ansible_host }}"
+      port: 22
+      timeout: 1200
+      delay: 10
+    delegate_to: localhost
+
+  - name: Wait for Ansible to be able to run on the node
     ansible.builtin.wait_for_connection:
-      timeout: 600
-      delay: 15
+      timeout: 300
 
   - name: Gather facts now that the node is up
     ansible.builtin.setup:

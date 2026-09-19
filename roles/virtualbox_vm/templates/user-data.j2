@@ -12,11 +12,9 @@ users:
   ssh_authorized_keys:
   - {{ ssh_public_key }}
 
-packages:
-- python3
-- python-is-python3
-
-package_update: true
+# No packages and no package_update on purpose: the cloud image already ships
+# python3, which is all Ansible needs, and an apt update on first boot adds
+# minutes per node for nothing. k8s_common installs everything else.
 
 write_files:
 # Matched by MAC, not interface name: VirtualBox NIC naming varies by chipset,
