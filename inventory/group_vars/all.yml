@@ -40,3 +40,15 @@ metallb_chart_version: 0.15.3
 metallb_pool: 192.168.56.20-192.168.56.40
 gitops_repo_url: https://github.com/Costel03/homelab-gitops.git
 gitops_repo_revision: main
+
+# Vault's root token and unseal key. Written once at init and never
+# recoverable afterwards.
+vault_init_file: "{{ lookup('env', 'HOME') }}/vault-init.json"
+
+# Printed after trusting the CA — these still have to go in the Windows
+# hosts file by hand.
+homelab_hosts:
+  argocd.homelab: 192.168.56.20
+  grafana.homelab: 192.168.56.21
+  vault.homelab: 192.168.56.22
+  my-app.homelab: 192.168.56.25

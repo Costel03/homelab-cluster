@@ -1,0 +1,55 @@
+---
+# The CA is minted in-cluster by cert-manager, so it has to be pulled back out
+# and trusted on the host before any https://*.homelab URL validates.
+
+- name: Wait for cert-manager to issue the CA
+  ansible.builtin.command:
+    argv: [kubectl, wait, --for, condition=Ready, certificate/homelab-ca, -n, cert-manager, --timeout=300s]
+  changed_when: false
+
+- name: Read the CA certificate
+  ansible.builtin.command:
+    argv: [kubectl, get, secret, homelab-ca-key-pair, -n, cert-manager, -o, 'jsonpath={.data.tls\.crt}']
+  register: ca_b64
+  changed_when: false
+
+- name: Write it to the home directory
+  ansible.builtin.copy:
+    content: "{{ ca_b64.stdout | b64decode }}"
+    dest: "{{ lookup('env', 'HOME') }}/homelab-ca.crt"
+    mode: '0644'
+
+- name: Trust it in WSL
+  ansible.builtin.copy:
+    content: "{{ ca_b64.stdout | b64decode }}"
+    dest: /usr/local/share/ca-certificates/homelab-ca.crt
+    mode: '0644'
+  become: true
+  notify: Update CA trust
+
+- name: Copy it somewhere Windows can read
+  ansible.builtin.copy:
+    content: "{{ ca_b64.stdout | b64decode }}"
+    dest: "/mnt/c/Users/{{ windows_user }}/homelab-ca.crt"
+    mode: '0644'
+
+# Importing into LocalMachine\Root needs Administrator, so this raises a UAC
+# prompt. Idempotent — importing the same cert twice is a no-op.
+- name: Trust it on Windows (accept the UAC prompt)
+  ansible.builtin.command:
+    argv:
+    - /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+    - -NoProfile
+    - -Command
+    - >-
+      Start-Process powershell -Verb RunAs -Wait -ArgumentList
+      @('-NoProfile','-Command','Import-Certificate -FilePath
+      ''C:\Users\{{ windows_user }}\homelab-ca.crt''
+      -CertStoreLocation ''Cert:\LocalMachine\Root''')
+  changed_when: true
+
+- name: Show the hosts-file entries still needed
+  ansible.builtin.debug:
+    msg: >-
+      Add to C:\Windows\System32\drivers\etc\hosts as Administrator —
+      {% for svc, ip in homelab_hosts.items() %}{{ ip }} {{ svc }}{{ '; ' if not loop.last }}{% endfor %}

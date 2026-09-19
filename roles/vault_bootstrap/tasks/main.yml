@@ -1,0 +1,111 @@
+---
+# Vault comes up sealed and empty. Initialising and unsealing it cannot be
+# declarative — the unseal key only exists once, at init — so it happens here
+# rather than in the GitOps repo.
+
+- name: Wait for ArgoCD to create the Vault pod
+  ansible.builtin.command:
+    argv: [kubectl, get, pod, hashicorp-vault-0, -n, hashicorp-vault]
+  register: vault_pod
+  retries: 60
+  delay: 10
+  until: vault_pod.rc == 0
+  changed_when: false
+
+- name: Wait for the Vault pod to be Ready
+  ansible.builtin.command:
+    argv: [kubectl, wait, pod/hashicorp-vault-0, -n, hashicorp-vault, --for, condition=Ready, --timeout=300s]
+  changed_when: false
+
+- name: Read Vault's status
+  ansible.builtin.command:
+    argv: [kubectl, exec, -n, hashicorp-vault, hashicorp-vault-0, --, vault, status, -format=json]
+  register: vault_status
+  failed_when: false
+  changed_when: false
+
+- name: Parse it
+  ansible.builtin.set_fact:
+    vault_state: "{{ vault_status.stdout | from_json if vault_status.stdout | default('') | length > 0 else {} }}"
+
+- name: Initialise Vault
+  when: not (vault_state.initialized | default(false))
+  block:
+  - name: Run vault operator init
+    ansible.builtin.command:
+      argv:
+      - kubectl
+      - exec
+      - -n
+      - hashicorp-vault
+      - hashicorp-vault-0
+      - --
+      - vault
+      - operator
+      - init
+      - -key-shares=1
+      - -key-threshold=1
+      - -format=json
+    register: vault_init
+    no_log: true
+
+  - name: Save the keys
+    ansible.builtin.copy:
+      content: "{{ vault_init.stdout }}"
+      dest: "{{ vault_init_file }}"
+      mode: '0600'
+    no_log: true
+
+- name: Fail early if Vault is initialised but the keys are gone
+  ansible.builtin.stat:
+    path: "{{ vault_init_file }}"
+  register: vault_keys
+  failed_when: not vault_keys.stat.exists
+
+- name: Load the keys
+  ansible.builtin.slurp:
+    src: "{{ vault_init_file }}"
+  register: vault_keys_raw
+  no_log: true
+
+- name: Extract the root token and unseal key
+  ansible.builtin.set_fact:
+    vault_root_token: "{{ (vault_keys_raw.content | b64decode | from_json).root_token }}"
+    vault_unseal_key: "{{ (vault_keys_raw.content | b64decode | from_json).unseal_keys_b64[0] }}"
+  no_log: true
+
+- name: Unseal Vault
+  ansible.builtin.command:
+    argv: [kubectl, exec, -n, hashicorp-vault, hashicorp-vault-0, --, vault, operator, unseal, "{{ vault_unseal_key }}"]
+  when: vault_state.sealed | default(true)
+  no_log: true
+
+- name: Ensure the eso namespace exists
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Namespace
+    name: eso
+    state: present
+
+# ESO authenticates to Vault with this; the auto-unseal Deployment uses the
+# unseal key after a host reboot.
+- name: Create the Vault access secrets
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ item.name }}"
+        namespace: "{{ item.namespace }}"
+      stringData: "{{ item.data }}"
+  loop:
+  - name: vault-token
+    namespace: eso
+    data: { token: "{{ vault_root_token }}" }
+  - name: vault-unseal-key
+    namespace: hashicorp-vault
+    data: { key: "{{ vault_unseal_key }}" }
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true

@@ -21,6 +21,8 @@ Stages are independent:
 | `make vms` | Creates and boots the VMs, waits for SSH |
 | `make cluster` | containerd, kubeadm init/join, Calico, fetches the kubeconfig |
 | `make apps` | MetalLB, ArgoCD, applies the app-of-apps |
+| `make vault` | Initialises and unseals Vault, then trusts the homelab CA |
+| `make trust-ca` | Just the CA step, after cert-manager has issued it |
 | `make destroy` | Deletes the VMs and their disks |
 | `make check` | Syntax-checks every playbook |
 
@@ -72,6 +74,16 @@ PowerShell and VS Code:
 ```powershell
 ssh master
 ```
+
+## Certificates
+
+cert-manager (declared in homelab-gitops) mints a `homelab-ca` and signs a
+90-day certificate per service, renewing 15 days before expiry. `make vault`
+pulls that CA back out of the cluster and trusts it in WSL and on Windows —
+the Windows import raises a **UAC prompt**.
+
+Hostnames are `*.homelab` and still need hosts-file entries; the playbook
+prints them at the end.
 
 ## Registry
 

@@ -146,7 +146,7 @@
   when: not kubeadm_config.stat.exists
 
 # Pre-pull images before init so the 20m health-check timer isn't eaten
-# by image downloads through the (not-yet-running) zot.local mirror.
+# by image downloads through the (not-yet-running) zot.homelab mirror.
 - name: Pre-pull kubeadm control-plane images
   become: true
   command: kubeadm config images pull --config /tmp/kubeadm-init-config.yaml

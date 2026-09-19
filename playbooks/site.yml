@@ -5,3 +5,4 @@
 - ansible.builtin.import_playbook: vms.yml
 - ansible.builtin.import_playbook: cluster.yml
 - ansible.builtin.import_playbook: apps.yml
+- ansible.builtin.import_playbook: vault.yml

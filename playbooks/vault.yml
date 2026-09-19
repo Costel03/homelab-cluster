@@ -1,0 +1,8 @@
+---
+- name: Initialise and unseal Vault, then trust the homelab CA
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  roles:
+  - { role: vault_bootstrap, tags: [vault] }
+  - { role: trust_ca, tags: [trust-ca] }
