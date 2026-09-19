@@ -4,6 +4,15 @@
     argv: [ssh-keygen, -t, ed25519, -N, '', -C, homelab, -f, '{{ ssh_key_path }}']
     creates: "{{ ssh_key_path }}"
 
+- name: Read the public key
+  ansible.builtin.slurp:
+    src: "{{ ssh_key_path }}.pub"
+  register: homelab_pubkey_raw
+
+- name: Publish it as a fact for the VM play
+  ansible.builtin.set_fact:
+    homelab_public_key: "{{ homelab_pubkey_raw.content | b64decode | trim }}"
+
 - name: Ensure the Windows .ssh directory exists
   ansible.builtin.file:
     path: "{{ windows_ssh_dir }}"
@@ -12,18 +21,20 @@
 
 - name: Copy the keypair to Windows
   ansible.builtin.copy:
-    src: "{{ item.src }}"
-    dest: "{{ windows_ssh_dir }}/{{ item.dest }}"
+    src: "{{ key_file.src }}"
+    dest: "{{ windows_ssh_dir }}/{{ key_file.dest }}"
     mode: '0600'
   loop:
   - { src: "{{ ssh_key_path }}", dest: homelab }
   - { src: "{{ ssh_key_path }}.pub", dest: homelab.pub }
   loop_control:
-    label: "{{ item.dest }}"
-  register: windows_key_copy
+    loop_var: key_file
+    label: "{{ key_file.dest }}"
 
 # NTFS ignores the mode above and inherits ACLs from the parent directory.
-# ssh.exe refuses a private key other accounts can read.
+# ssh.exe refuses a private key other accounts can read. Full control for the
+# owner, nobody else — granting only Read would leave the file unwritable and
+# break the next run.
 - name: Restrict the private key's ACL on Windows
   ansible.builtin.command:
     argv:
@@ -31,9 +42,9 @@
     - '{{ windows_ssh_dir_win }}\homelab'
     - /inheritance:r
     - /grant:r
-    - '{{ windows_user }}:R'
-  when: windows_key_copy.changed
-  changed_when: true
+    - '{{ windows_user }}:(F)'
+  register: icacls_result
+  changed_when: "'Successfully processed 1 files' in icacls_result.stdout"
 
 - name: Add the nodes to the Windows SSH config
   ansible.builtin.blockinfile:
