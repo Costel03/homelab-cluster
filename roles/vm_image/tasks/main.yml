@@ -5,13 +5,18 @@
   register: vbox_props
   changed_when: false
 
+# Match line-wise: VBoxManage prints dozens of properties with CRLF endings,
+# and a regex over the whole blob runs past the end of the line.
 - name: Convert the machine folder to a WSL path
   ansible.builtin.command:
     argv:
     - wslpath
     - -u
-    - "{{ vbox_props.stdout | replace('\r', '')
-          | regex_search('Default machine folder:\\s*(.+)', '\\1') | first | trim }}"
+    - "{{ vbox_props.stdout_lines
+          | select('match', '^Default machine folder:')
+          | first
+          | regex_replace('^Default machine folder:\\s*', '')
+          | trim }}"
   register: vbox_vm_dir_raw
   changed_when: false
 
