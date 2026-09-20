@@ -173,6 +173,92 @@
       - --medium
       - "{{ vm_dir_win }}/seed.iso"
 
+# Sizing is only applied by modifyvm at creation, so editing group_vars would
+# otherwise have no effect on a VM that already exists. Reconcile it instead,
+# which means a stop/start when the numbers differ.
+- name: Reconcile CPU and memory on an existing VM
+  when: vm_exists
+  block:
+  - name: Read the VM's current sizing
+    ansible.builtin.command:
+      argv: ['{{ vbox_manage }}', showvminfo, '{{ vm_name }}', --machinereadable]
+    register: vm_info
+    changed_when: false
+
+  - name: Extract it
+    ansible.builtin.set_fact:
+      current_memory: "{{ vm_info.stdout_lines | select('match', '^memory=') | first | regex_replace('^memory=\"?([0-9]+)\"?$', '\\1') | int }}"
+      current_cpus: "{{ vm_info.stdout_lines | select('match', '^cpus=') | first | regex_replace('^cpus=\"?([0-9]+)\"?$', '\\1') | int }}"
+
+  - name: Apply the new sizing
+    when: current_memory | int != vm_memory_mb | int or current_cpus | int != vm_cpus | int
+    block:
+    - name: Report the change
+      ansible.builtin.debug:
+        msg: >-
+          {{ vm_name }}: {{ current_cpus }} vCPU / {{ current_memory }} MB
+          -> {{ vm_cpus }} vCPU / {{ vm_memory_mb }} MB (needs a restart)
+
+    # The cloud image has no acpid, so controlvm acpipowerbutton is ignored.
+    # Shut down from inside instead; the command loses its connection as the
+    # host goes down, which is not a failure.
+    - name: Shut the VM down from inside
+      ansible.builtin.command:
+        argv:
+        - ssh
+        - -i
+        - "{{ ssh_key_path }}"
+        - -o
+        - BatchMode=yes
+        - -o
+        - StrictHostKeyChecking=no
+        - -o
+        - UserKnownHostsFile=/dev/null
+        - -o
+        - LogLevel=ERROR
+        - "{{ node_user }}@{{ vm_ip }}"
+        - sudo shutdown -h now
+      failed_when: false
+      when: vm_is_running
+
+    - name: Wait for it to stop
+      ansible.builtin.command:
+        argv: ['{{ vbox_manage }}', list, runningvms]
+      register: still_running
+      until: still_running.stdout_lines | select('match', '^"' ~ vm_name ~ '"') | list | length == 0
+      retries: 24
+      delay: 5
+      changed_when: false
+      failed_when: false
+      when: vm_is_running
+
+    - name: Pull the power if it is still up after two minutes
+      ansible.builtin.command:
+        argv: ['{{ vbox_manage }}', controlvm, '{{ vm_name }}', poweroff]
+      when:
+      - vm_is_running
+      - still_running.stdout_lines | select('match', '^"' ~ vm_name ~ '"') | list | length > 0
+
+    - name: Let VirtualBox release the disk lock
+      ansible.builtin.pause:
+        seconds: 3
+      when: vm_is_running
+
+    - name: Resize
+      ansible.builtin.command:
+        argv:
+        - '{{ vbox_manage }}'
+        - modifyvm
+        - '{{ vm_name }}'
+        - --memory
+        - "{{ vm_memory_mb }}"
+        - --cpus
+        - "{{ vm_cpus }}"
+
+    - name: Note that it must be started again
+      ansible.builtin.set_fact:
+        vm_is_running: false
+
 - name: Start the VM
   ansible.builtin.command:
     argv: ['{{ vbox_manage }}', startvm, '{{ vm_name }}', --type, headless]

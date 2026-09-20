@@ -1,6 +1,8 @@
 ---
-# 1:2 CPU:GB — this stack runs out of memory long before CPU.
+# 1:1.5 CPU:GB. VirtualBox claims host RAM as the guest touches it and never
+# gives it back, so over-provisioning costs real memory on the laptop even
+# while the guest sits idle. Raise this if pods start getting evicted.
 vm_cpus: 4
-vm_memory_mb: 8192
+vm_memory_mb: 6144
 vm_disk_gb: 50
 node_role: worker
