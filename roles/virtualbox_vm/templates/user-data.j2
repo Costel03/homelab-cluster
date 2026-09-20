@@ -32,6 +32,14 @@ write_files:
           set-name: hostonly
           addresses: [{{ vm_ip }}/{{ net_prefix }}]
 
+# No Guest Additions, so nothing syncs the guest clock to the host and it
+# free-runs across laptop sleeps. A drifting clock expires join tokens early
+# and breaks certificate validity.
+ntp:
+  enabled: true
+
 runcmd:
 - [netplan, apply]
 - [swapoff, -a]
+- [systemctl, enable, --now, systemd-timesyncd]
+- [timedatectl, set-ntp, "true"]

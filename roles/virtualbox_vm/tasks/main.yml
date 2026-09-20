@@ -124,6 +124,9 @@
       - --macaddress2
       - '{{ vm_mac }}'
 
+  # hostiocache=on: without it every guest fsync goes straight to the laptop
+  # disk, etcd sees 200-350ms apply latency with three VMs running, and the
+  # apiserver misses kubeadm's health-check window.
   - name: Add a SATA controller
     ansible.builtin.command:
       argv:
@@ -138,6 +141,8 @@
       - IntelAhci
       - --portcount
       - '2'
+      - --hostiocache
+      - 'on'
 
   - name: Attach the disk
     ansible.builtin.command:
