@@ -31,9 +31,12 @@
     path: /etc/kubernetes/admin.conf
   register: kubeadm_config
 
-# If admin.conf was written by a previously failed kubeadm init (e.g. the
-# API server never became healthy so RBAC bootstrap never completed), we
-# must treat it as uninitialized and run a full reset + reinit.
+# A half-finished kubeadm init leaves admin.conf behind, and that has to be
+# cleared before a retry can work. But the check is a live API call, so a
+# transient failure - a kubelet restart, a busy apiserver - used to trigger a
+# full reset and re-init, which mints a NEW CA: every kubeconfig and every
+# joined worker is invalidated, and a healthy cluster is destroyed by a
+# re-run. Re-initialising is now opt-in.
 - name: Verify control plane RBAC is healthy (requires working admin bootstrap)
   shell: kubectl get nodes --request-timeout=15s
   environment:
@@ -42,12 +45,29 @@
   failed_when: false
   changed_when: false
   when: kubeadm_config.stat.exists
+  retries: 6
+  delay: 10
+  until: k8s_health.rc == 0
 
-- name: Remove stale admin.conf if cluster is unhealthy (triggers full re-init)
+- name: Stop rather than silently rebuild an unhealthy control plane
+  ansible.builtin.fail:
+    msg: >-
+      The control plane is not answering and force_reinit is not set. Re-initialising
+      would generate a new CA and invalidate every kubeconfig and joined node.
+      Investigate first, then re-run with -e force_reinit=true to rebuild it.
+  when:
+  - kubeadm_config.stat.exists
+  - k8s_health.rc is defined and k8s_health.rc != 0
+  - not (force_reinit | default(false) | bool)
+
+- name: Remove stale admin.conf to force a full re-init
   file:
     path: /etc/kubernetes/admin.conf
     state: absent
-  when: kubeadm_config.stat.exists and (k8s_health.rc is defined and k8s_health.rc != 0)
+  when:
+  - kubeadm_config.stat.exists
+  - k8s_health.rc is defined and k8s_health.rc != 0
+  - force_reinit | default(false) | bool
 
 - name: Recheck initialization state after health verification
   stat:
@@ -225,18 +245,17 @@
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf
 
-- name: Save kubeadm join command
-  shell: |
-    kubeadm token create --print-join-command > /home/{{ node_user }}/kubeadm-join.sh
-  args:
-    creates: /home/{{ node_user }}/kubeadm-join.sh
-
-- name: Make join script executable
-  file:
-    path: /home/{{ node_user }}/kubeadm-join.sh
-    mode: '0755'
-    owner: "{{ node_user }}"
-    group: "{{ node_user }}"
+# Join tokens expire. Writing the command to a file once with `creates:` meant
+# every later run reused a dead token, and the workers failed with "could not
+# find a JWS signature in the cluster-info ConfigMap". Mint a fresh one each
+# run and hand it to the workers through hostvars instead of a file.
+- name: Create a fresh join command
+  shell: kubeadm token create --print-join-command
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: kubeadm_join_command
+  changed_when: false
+  become: true
 
 # ---------------------------------------------------------------------
 # NFS Server — exports /share for the nfs-subdir-external-provisioner
