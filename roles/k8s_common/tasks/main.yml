@@ -159,19 +159,28 @@
     mode: '0644'
   become: true
 
-# Wipe containerd state from the linked-clone base image so each node
-# starts with a clean runtime (no stale container name conflicts).
+# Clear stale runtime state before a node first joins. Guarded on
+# kubelet.conf: unconditionally wiping /var/lib/containerd destroys every
+# image and running container on a node that is already part of the cluster,
+# which took the control plane down on a plain re-run.
+- name: Check whether this node has already joined
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: kubelet_conf
+
 - name: Stop containerd before wiping state
   systemd:
     name: containerd
     state: stopped
   ignore_errors: true
+  when: not kubelet_conf.stat.exists
 
 - name: Wipe containerd state database
   file:
     path: /var/lib/containerd
     state: absent
   become: true
+  when: not kubelet_conf.stat.exists
 
 - name: Reexec systemd
   command: systemctl daemon-reexec
