@@ -111,6 +111,9 @@
     - kubelet
     - kubeadm
     - kubectl
+    # crictl: the only way to see why a static pod is failing when the
+    # apiserver itself is the thing that is down.
+    - cri-tools
     state: present
     update_cache: yes
   environment:
