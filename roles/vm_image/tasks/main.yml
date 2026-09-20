@@ -20,10 +20,13 @@
   register: vbox_vm_dir_raw
   changed_when: false
 
+# Name the cached VDI after the image it came from. A fixed name meant that
+# changing cloud_image_url silently reused the previously cached release,
+# because the only check is whether the file exists.
 - name: Set image paths
   ansible.builtin.set_fact:
     vbox_vm_dir: "{{ vbox_vm_dir_raw.stdout | trim }}"
-    base_vdi: "{{ vbox_vm_dir_raw.stdout | trim }}/_homelab-base/base.vdi"
+    base_vdi: "{{ vbox_vm_dir_raw.stdout | trim }}/_homelab-base/{{ cloud_image_url | basename | regex_replace('[.]img$', '') }}.vdi"
 
 - name: Check whether the base VDI already exists
   ansible.builtin.stat:
@@ -66,8 +69,8 @@
       - -O
       - vdi
       - "{{ image_cache_dir }}/{{ cloud_image_url | basename }}"
-      - "{{ image_cache_dir }}/base.vdi"
-      creates: "{{ image_cache_dir }}/base.vdi"
+      - "{{ image_cache_dir }}/{{ cloud_image_url | basename | regex_replace('[.]img$', '') }}.vdi"
+      creates: "{{ image_cache_dir }}/{{ cloud_image_url | basename | regex_replace('[.]img$', '') }}.vdi"
 
   - name: Ensure the VirtualBox base directory exists
     ansible.builtin.file:
@@ -77,11 +80,11 @@
 
   - name: Stage the base VDI where VirtualBox can reach it
     ansible.builtin.copy:
-      src: "{{ image_cache_dir }}/base.vdi"
+      src: "{{ image_cache_dir }}/{{ cloud_image_url | basename | regex_replace('[.]img$', '') }}.vdi"
       dest: "{{ base_vdi }}"
       mode: '0644'
 
   - name: Drop the intermediate VDI
     ansible.builtin.file:
-      path: "{{ image_cache_dir }}/base.vdi"
+      path: "{{ image_cache_dir }}/{{ cloud_image_url | basename | regex_replace('[.]img$', '') }}.vdi"
       state: absent
