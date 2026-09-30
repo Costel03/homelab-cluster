@@ -146,6 +146,17 @@
         bindPort: 6443
       nodeRegistration:
         criSocket: unix:///run/containerd/containerd.sock
+      # Defaults assume server-grade disks. etcd here sees 200-350ms apply
+      # latency on a laptop SSD shared with the workers, so the apiserver is
+      # not serving within kubernetesAPICall's 1m default and init dies at the
+      # bootstrap-admin phase, leaving a cluster with no admin RBAC binding.
+      timeouts:
+        controlPlaneComponentHealthCheck: 10m0s
+        kubeletHealthCheck: 10m0s
+        kubernetesAPICall: 10m0s
+        etcdAPICall: 5m0s
+        discovery: 5m0s
+        tlsBootstrap: 10m0s
       ---
       apiVersion: kubeadm.k8s.io/v1beta4
       kind: ClusterConfiguration
