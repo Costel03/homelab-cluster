@@ -262,7 +262,13 @@
       ansible.builtin.set_fact:
         vm_is_running: false
 
+# vm_autostart is false during the creation pass: starting master and then
+# cloning two 2GB disks means master does its early boot while the host copies
+# 4GB, which starves it badly enough that it wedges in the kernel's RAID6
+# benchmark. The workers never hit this because they boot after the storm.
 - name: Start the VM
   ansible.builtin.command:
     argv: ['{{ vbox_manage }}', startvm, '{{ vm_name }}', --type, headless]
-  when: not vm_is_running
+  when:
+  - not vm_is_running
+  - vm_autostart | default(true) | bool

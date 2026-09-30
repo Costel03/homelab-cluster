@@ -25,11 +25,38 @@
   # leaves the connection cached as local for these hosts, and every
   # wait_for_connection in a later play then fails with "timed out waiting for
   # ping module test" even though SSH is perfectly healthy.
-  - name: Create and start the VM
+  - name: Create the VM without starting it
     ansible.builtin.include_role:
       name: virtualbox_vm
       apply:
         delegate_to: localhost
+    vars:
+      vm_autostart: false
+
+# Started only once every disk is cloned, and staggered so three simultaneous
+# boots do not recreate the same I/O storm.
+- name: Start the VMs
+  hosts: k8s_nodes
+  gather_facts: false
+  serial: 1
+  tasks:
+  - name: List running VMs
+    ansible.builtin.command:
+      argv: ['{{ vbox_manage }}', list, runningvms]
+    register: running_now
+    changed_when: false
+    delegate_to: localhost
+
+  - name: Start it
+    ansible.builtin.command:
+      argv: ['{{ vbox_manage }}', startvm, '{{ inventory_hostname }}', --type, headless]
+    delegate_to: localhost
+    when: running_now.stdout_lines | select('match', '^"' ~ inventory_hostname ~ '"') | list | length == 0
+
+  - name: Give it a head start before the next one boots
+    ansible.builtin.pause:
+      seconds: 20
+    delegate_to: localhost
 
 - name: Wait for the nodes to answer
   hosts: k8s_nodes
