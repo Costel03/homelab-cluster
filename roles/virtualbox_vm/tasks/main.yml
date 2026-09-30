@@ -101,8 +101,6 @@
       - "{{ vm_cpus }}"
       - --paravirtprovider
       - hyperv
-      - --nested-hw-virt
-      - 'on'
       - --graphicscontroller
       - vmsvga
       - --vram
