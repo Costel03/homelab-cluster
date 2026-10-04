@@ -1,33 +1,6 @@
 ---
-- name: Create swap file (4GB) on master to prevent OOM
-  command: fallocate -l 4G /swapfile
-  args:
-    creates: /swapfile
-
-- name: Set swap file permissions
-  file:
-    path: /swapfile
-    mode: '0600'
-
-- name: Format swap file
-  command: mkswap /swapfile
-  args:
-    creates: /proc/swaps # not ideal but mkswap is safe to run again
-  changed_when: false
-
-- name: Enable swap
-  command: swapon /swapfile
-  changed_when: false
-  failed_when: false
-
-- name: Persist swap in fstab
-  lineinfile:
-    path: /etc/fstab
-    line: '/swapfile none swap sw 0 0'
-    state: present
-
 - name: Check if Kubernetes is already initialized
-  stat:
+  ansible.builtin.stat:
     path: /etc/kubernetes/admin.conf
   register: kubeadm_config
 
@@ -38,7 +11,7 @@
 # joined worker is invalidated, and a healthy cluster is destroyed by a
 # re-run. Re-initialising is now opt-in.
 - name: Verify control plane RBAC is healthy (requires working admin bootstrap)
-  shell: kubectl get nodes --request-timeout=15s
+  ansible.builtin.command: kubectl get nodes --request-timeout=15s
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf
   register: k8s_health
@@ -61,7 +34,7 @@
   - not (force_reinit | default(false) | bool)
 
 - name: Remove stale admin.conf to force a full re-init
-  file:
+  ansible.builtin.file:
     path: /etc/kubernetes/admin.conf
     state: absent
   when:
@@ -70,133 +43,112 @@
   - force_reinit | default(false) | bool
 
 - name: Recheck initialization state after health verification
-  stat:
+  ansible.builtin.stat:
     path: /etc/kubernetes/admin.conf
   register: kubeadm_config
 
-- name: Restart containerd to ensure it's running
-  systemd:
-    name: containerd
-    state: restarted
-    enabled: true
-
-- name: Wait for containerd socket to be ready
-  wait_for:
-    path: /run/containerd/containerd.sock
-    state: present
-    timeout: 60
-
-- name: Reset any partial kubeadm state before init
-  become: true
-  shell: |
-    kubeadm reset -f
-    rm -rf /etc/kubernetes/manifests /etc/kubernetes/pki /var/lib/etcd
+- name: Initialise the control plane
   when: not kubeadm_config.stat.exists
-  ignore_errors: true
+  block:
+  - name: Wait for the containerd socket
+    ansible.builtin.wait_for:
+      path: /run/containerd/containerd.sock
+      state: present
+      timeout: 60
 
-- name: Kill any lingering control-plane processes after reset
-  become: true
-  shell: |
-    # /proc/<pid>/comm is capped at 15 chars — use truncated names.
-    # Do NOT use pkill -f: it matches the full cmdline including the
-    # text of this shell script, which would kill the Ansible runner.
-    pkill -9 kube-apiserver  2>/dev/null || true
-    pkill -9 kube-scheduler  2>/dev/null || true
-    pkill -9 kube-controller 2>/dev/null || true  # kube-controller-manager truncated to 15 chars
-    pkill -9 etcd            2>/dev/null || true
-  when: not kubeadm_config.stat.exists
+  - name: Reset any partial kubeadm state
+    ansible.builtin.shell: |
+      kubeadm reset -f
+      rm -rf /etc/kubernetes/manifests /etc/kubernetes/pki /var/lib/etcd
+    changed_when: true
 
-- name: Wait for control-plane ports to be free after reset
-  wait_for:
-    port: "{{ item }}"
-    state: stopped
-    timeout: 60
-    delay: 2
-  loop:
-  - 6443 # kube-apiserver
-  - 10257 # kube-controller-manager
-  - 10259 # kube-scheduler
-  - 2379 # etcd client
-  - 2380 # etcd peer
-  when: not kubeadm_config.stat.exists
+  - name: Kill any lingering control-plane processes after reset
+    ansible.builtin.shell: |
+      # /proc/<pid>/comm is capped at 15 chars — use truncated names.
+      # Do NOT use pkill -f: it matches the full cmdline including the
+      # text of this shell script, which would kill the Ansible runner.
+      pkill -9 kube-apiserver  2>/dev/null || true
+      pkill -9 kube-scheduler  2>/dev/null || true
+      pkill -9 kube-controller 2>/dev/null || true  # kube-controller-manager truncated to 15 chars
+      pkill -9 etcd            2>/dev/null || true
+    changed_when: false
 
-- name: Wait for the host-only interface to get its address
-  shell: ip addr show | grep -c '{{ api_advertise_address }}'
-  register: iface_check
-  until: iface_check.rc == 0 and iface_check.stdout | int > 0
-  retries: 24
-  delay: 5
-  when: not kubeadm_config.stat.exists
+  - name: Wait for control-plane ports to be free after reset
+    ansible.builtin.wait_for:
+      port: "{{ item }}"
+      state: stopped
+      timeout: 60
+      delay: 2
+    loop:
+    - 6443   # kube-apiserver
+    - 10257  # kube-controller-manager
+    - 10259  # kube-scheduler
+    - 2379   # etcd client
+    - 2380   # etcd peer
 
-- name: Get installed kubeadm version
-  command: kubeadm version -o short
-  register: kubeadm_ver
-  when: not kubeadm_config.stat.exists
+  - name: Wait for the host-only interface to get its address
+    ansible.builtin.command: ip -4 -o addr show hostonly
+    register: iface_check
+    until: api_advertise_address in iface_check.stdout
+    retries: 24
+    delay: 5
+    changed_when: false
 
-- name: Write kubeadm init config
-  become: true
-  copy:
-    dest: /tmp/kubeadm-init-config.yaml
-    mode: '0644'
-    content: |
-      apiVersion: kubeadm.k8s.io/v1beta4
-      kind: InitConfiguration
-      localAPIEndpoint:
-        advertiseAddress: {{ api_advertise_address }}
-        bindPort: 6443
-      nodeRegistration:
-        criSocket: unix:///run/containerd/containerd.sock
-      # Defaults assume server-grade disks. etcd here sees 200-350ms apply
-      # latency on a laptop SSD shared with the workers, so the apiserver is
-      # not serving within kubernetesAPICall's 1m default and init dies at the
-      # bootstrap-admin phase, leaving a cluster with no admin RBAC binding.
-      timeouts:
-        controlPlaneComponentHealthCheck: 10m0s
-        kubeletHealthCheck: 10m0s
-        kubernetesAPICall: 10m0s
-        etcdAPICall: 5m0s
-        discovery: 5m0s
-        tlsBootstrap: 10m0s
-      ---
-      apiVersion: kubeadm.k8s.io/v1beta4
-      kind: ClusterConfiguration
-      kubernetesVersion: {{ kubeadm_ver.stdout | trim }}
-      networking:
-        podSubnet: {{ pod_subnet }}
-      ---
-      apiVersion: kubelet.config.k8s.io/v1beta1
-      kind: KubeletConfiguration
-      failSwapOn: false
-  when: not kubeadm_config.stat.exists
+  - name: Get installed kubeadm version
+    ansible.builtin.command: kubeadm version -o short
+    register: kubeadm_ver
+    changed_when: false
 
-# Pre-pull images before init so the 20m health-check timer isn't eaten
-# by image downloads through the (not-yet-running) zot.homelab mirror.
-- name: Pre-pull kubeadm control-plane images
-  become: true
-  command: kubeadm config images pull --config /tmp/kubeadm-init-config.yaml
-  retries: 3
-  delay: 10
-  register: image_pull_result
-  until: image_pull_result.rc == 0
-  when: not kubeadm_config.stat.exists
+  - name: Write kubeadm init config
+    ansible.builtin.copy:
+      dest: /root/kubeadm-init-config.yaml
+      mode: '0600'
+      content: |
+        apiVersion: kubeadm.k8s.io/v1beta4
+        kind: InitConfiguration
+        localAPIEndpoint:
+          advertiseAddress: {{ api_advertise_address }}
+          bindPort: 6443
+        nodeRegistration:
+          criSocket: unix:///run/containerd/containerd.sock
+        # Defaults assume server-grade disks. etcd here sees 200-350ms apply
+        # latency on a laptop SSD shared with the workers, so the apiserver is
+        # not serving within kubernetesAPICall's 1m default and init dies at the
+        # bootstrap-admin phase, leaving a cluster with no admin RBAC binding.
+        timeouts:
+          controlPlaneComponentHealthCheck: 10m0s
+          kubeletHealthCheck: 10m0s
+          kubernetesAPICall: 10m0s
+          etcdAPICall: 5m0s
+          discovery: 5m0s
+          tlsBootstrap: 10m0s
+        ---
+        apiVersion: kubeadm.k8s.io/v1beta4
+        kind: ClusterConfiguration
+        kubernetesVersion: {{ kubeadm_ver.stdout | trim }}
+        networking:
+          podSubnet: {{ pod_subnet }}
 
-- name: Initialize Kubernetes control plane
-  become: true
-  shell: |
-    set -o pipefail
-    kubeadm init --config /tmp/kubeadm-init-config.yaml | tee /root/kubeadm-init.out
-  args:
-    executable: /bin/bash
-  when: not kubeadm_config.stat.exists
+  # Pre-pull so kubeadm's health-check timers are not eaten by downloads.
+  # These go through Zot, so a rebuild pulls them from the laptop.
+  - name: Pre-pull kubeadm control-plane images
+    ansible.builtin.command: kubeadm config images pull --config /root/kubeadm-init-config.yaml
+    retries: 3
+    delay: 10
+    register: image_pull_result
+    until: image_pull_result.rc == 0
+    changed_when: true
 
-- name: Enable and start kubelet (just in case)
-  systemd:
-    name: kubelet
-    enabled: yes
-    state: started
+  - name: Initialize Kubernetes control plane
+    ansible.builtin.shell: |
+      set -o pipefail
+      kubeadm init --config /root/kubeadm-init-config.yaml | tee /root/kubeadm-init.out
+    args:
+      executable: /bin/bash
+    changed_when: true
 
 - name: Create .kube directory for the node user
-  file:
+  ansible.builtin.file:
     path: /home/{{ node_user }}/.kube
     state: directory
     owner: "{{ node_user }}"
@@ -204,82 +156,74 @@
     mode: '0755'
 
 - name: Copy kubeconfig to the node user
-  copy:
+  ansible.builtin.copy:
     src: /etc/kubernetes/admin.conf
     dest: /home/{{ node_user }}/.kube/config
-    remote_src: yes
+    remote_src: true
     owner: "{{ node_user }}"
     group: "{{ node_user }}"
     mode: '0600'
 
-- name: Check if Calico is already installed
-  command: kubectl get daemonset calico-node -n kube-system
-  environment:
-    KUBECONFIG: /etc/kubernetes/admin.conf
-  register: calico_status
-  failed_when: false
-  changed_when: false
-
-- name: Download Calico manifest to control machine
-  delegate_to: localhost
-  become: false
-  get_url:
+# ── Calico ───────────────────────────────────────────────────────────────────
+- name: Download the Calico manifest
+  ansible.builtin.get_url:
     url: https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico.yaml
-    dest: /tmp/calico.yaml
+    dest: /root/calico-{{ calico_version }}.yaml
     mode: '0644'
-    force: false
-  when: calico_status.rc != 0
+  register: calico_download
 
-- name: Copy Calico manifest to master
-  copy:
-    src: /tmp/calico.yaml
-    dest: /tmp/calico.yaml
-    mode: '0644'
-  when: calico_status.rc != 0
+# Set before the first calico-node starts. Patching the DaemonSet afterwards
+# raced it: the first pods autodetected the NAT NIC (10.0.2.15 on every node)
+# and the default pool is created once and never changed.
+- name: Pin the pod CIDR and the address Calico peers on
+  ansible.builtin.replace:
+    path: /root/calico-{{ calico_version }}.yaml
+    regexp: '^( +)# - name: CALICO_IPV4POOL_CIDR\n +#   value: "[^"]*"$'
+    replace: '\1- name: CALICO_IPV4POOL_CIDR\n\1  value: "{{ pod_subnet }}"\n\1- name: IP_AUTODETECTION_METHOD\n\1  value: "cidr={{ cluster_cidr }}"'
 
-- name: Apply Calico CNI
-  shell: |
-    kubectl apply -f /tmp/calico.yaml
+- name: Confirm the edit landed
+  ansible.builtin.command:
+    argv: [grep, -c, 'value: "cidr={{ cluster_cidr }}"', '/root/calico-{{ calico_version }}.yaml']
+  register: calico_edit
+  changed_when: false
+  failed_when: calico_edit.stdout | int != 1
+
+# Server-side: Calico's CRDs exceed the client-side last-applied annotation
+# limit. Re-applying an unchanged manifest is a no-op.
+- name: Apply Calico
+  ansible.builtin.command: kubectl apply --server-side --force-conflicts -f /root/calico-{{ calico_version }}.yaml
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf
   register: calico_apply
   until: calico_apply.rc == 0
   retries: 12
   delay: 30
-  when: calico_status.rc != 0
-
-- name: Set Calico IP autodetection and pod CIDR (avoids kubeadm-config API query on startup)
-  shell: |
-    kubectl -n kube-system set env daemonset/calico-node \
-      IP_AUTODETECTION_METHOD=cidr={{ cluster_cidr }} \
-      CALICO_IPV4POOL_CIDR={{ pod_subnet }}
-  environment:
-    KUBECONFIG: /etc/kubernetes/admin.conf
+  changed_when: calico_download is changed
 
 # Join tokens expire. Writing the command to a file once with `creates:` meant
 # every later run reused a dead token, and the workers failed with "could not
 # find a JWS signature in the cluster-info ConfigMap". Mint a fresh one each
 # run and hand it to the workers through hostvars instead of a file.
 - name: Create a fresh join command
-  shell: kubeadm token create --print-join-command
+  ansible.builtin.command: kubeadm token create --print-join-command --ttl 1h
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf
   register: kubeadm_join_command
   changed_when: false
-  become: true
 
 # ---------------------------------------------------------------------
 # NFS Server — exports /share for the nfs-subdir-external-provisioner
 # ---------------------------------------------------------------------
-
 - name: Install nfs-kernel-server
-  apt:
+  ansible.builtin.apt:
     name: nfs-kernel-server
     state: present
-    update_cache: yes
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 300
 
 - name: Create /share export directory
-  file:
+  ansible.builtin.file:
     path: /share
     state: directory
     owner: nobody
@@ -287,17 +231,15 @@
     mode: '0777'
 
 - name: Export /share via NFS to cluster subnet
-  lineinfile:
+  ansible.builtin.lineinfile:
     path: /etc/exports
     line: '/share {{ cluster_cidr }}(rw,sync,no_subtree_check,no_root_squash)'
     regexp: '^/share'
     state: present
+  notify: Re-export NFS shares
 
 - name: Enable and start nfs-kernel-server
-  systemd:
+  ansible.builtin.systemd:
     name: nfs-kernel-server
     state: started
     enabled: true
-
-- name: Re-export NFS shares
-  command: exportfs -ra

@@ -1,0 +1,23 @@
+---
+extends: default
+
+ignore: |
+  .ansible/
+
+rules:
+  line-length: disable
+  document-start: disable
+  truthy:
+    allowed-values: ['true', 'false']
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: false
+  braces:
+    max-spaces-inside: 1
+  indentation:
+    spaces: 2
+    indent-sequences: whatever
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true

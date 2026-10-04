@@ -52,6 +52,7 @@
       argv: ['{{ vbox_manage }}', startvm, '{{ inventory_hostname }}', --type, headless]
     delegate_to: localhost
     when: running_now.stdout_lines | select('match', '^"' ~ inventory_hostname ~ '"') | list | length == 0
+    changed_when: true
 
   - name: Give it a head start before the next one boots
     ansible.builtin.pause:

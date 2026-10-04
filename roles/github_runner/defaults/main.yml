@@ -1,0 +1,5 @@
+---
+github_runner_user: gh-runner
+github_runner_home: /home/gh-runner
+github_runner_dir: /opt/actions-runner
+github_runner_service: actions-runner

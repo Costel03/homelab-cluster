@@ -1,3 +1,4 @@
 *.retry
 *.log
 inventory/host_vars/*.local.yml
+.ansible/

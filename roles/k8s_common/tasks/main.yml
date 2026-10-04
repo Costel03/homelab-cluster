@@ -2,110 +2,96 @@
 # Runs against a stock Ubuntu cloud image: cloud-init only creates the user and
 # the static IP, so everything below — containerd, the Kubernetes packages,
 # sysctl, kernel modules, registry mirrors — is installed here on first run.
-# There is no pre-baked base image any more; the cached VDI in up.sh is the
-# unmodified upstream cloud image.
 
-- name: Ensure nfs-common is installed
-  apt:
-    name:
-    - nfs-common
+- name: Stop unattended-upgrades so it cannot hold the apt lock mid-run
+  ansible.builtin.systemd:
+    name: unattended-upgrades
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Install nfs-common
+  ansible.builtin.apt:
+    name: nfs-common
     state: present
-    update_cache: yes
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 300
 
 - name: Disable swap at runtime
-  command: swapoff -a
-  become: true
+  ansible.builtin.command: swapoff -a
+  changed_when: false
 
-- name: Remove swap entry from fstab (prevents swap re-enabling on reboot)
-  replace:
+- name: Keep swap off across reboots
+  ansible.builtin.replace:
     path: /etc/fstab
     regexp: '^([^#].*\sswap\s.*)$'
     replace: '# \1'
-  become: true
 
-- name: Load overlay kernel module
-  modprobe:
-    name: overlay
+# Loaded now and on every boot. Without the modules-load.d entry a rebooted
+# node comes up without br_netfilter and the bridge sysctls below fail.
+- name: Load the kernel modules Kubernetes networking needs
+  community.general.modprobe:
+    name: "{{ item }}"
     state: present
+  loop: [overlay, br_netfilter]
 
-- name: Load br_netfilter kernel module
-  modprobe:
-    name: br_netfilter
-    state: present
+- name: Load them on boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/kubernetes.conf
+    content: |
+      overlay
+      br_netfilter
+    mode: '0644'
 
 - name: Write Kubernetes sysctl config
-  copy:
+  ansible.builtin.copy:
     dest: /etc/sysctl.d/kubernetes.conf
     content: |
       net.bridge.bridge-nf-call-ip6tables = 1
       net.bridge.bridge-nf-call-iptables  = 1
       net.ipv4.ip_forward                 = 1
     mode: '0644'
-  become: true
+  notify: Apply sysctl
 
-- name: Reload sysctl
-  command: sysctl --system
-  become: true
+- name: Apply sysctl before anything depends on it
+  ansible.builtin.meta: flush_handlers
 
 # ── Container runtime + Kubernetes packages ──────────────────────────────────
-- name: Kill unattended-upgrades to release apt lock
-  shell: |
-    systemctl stop unattended-upgrades 2>/dev/null || true
-    systemctl disable unattended-upgrades 2>/dev/null || true
-    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 2; done
-  become: true
-
 - name: Create apt keyrings directory
-  file:
+  ansible.builtin.file:
     path: /etc/apt/keyrings
     state: directory
     mode: '0755'
-  become: true
 
 - name: Download Docker apt signing key
-  get_url:
+  ansible.builtin.get_url:
     url: https://download.docker.com/linux/ubuntu/gpg
-    dest: /tmp/docker.gpg
+    dest: /etc/apt/keyrings/docker.asc
     mode: '0644'
     force: false
-  become: true
 
-- name: Dearmor Docker apt signing key
-  shell: gpg --dearmor < /tmp/docker.gpg > /etc/apt/keyrings/docker.gpg
-  args:
-    creates: /etc/apt/keyrings/docker.gpg
-  become: true
-
-- name: Add Docker apt repository
-  copy:
+- name: Add Docker apt repository (containerd.io only)
+  ansible.builtin.copy:
     dest: /etc/apt/sources.list.d/docker.list
-    content: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable\n"
+    content: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable\n"
     mode: '0644'
-  become: true
 
 - name: Download Kubernetes apt signing key
-  get_url:
+  ansible.builtin.get_url:
     url: https://pkgs.k8s.io/core:/stable:/{{ kubernetes_series }}/deb/Release.key
-    dest: /tmp/kubernetes.gpg
+    dest: /etc/apt/keyrings/kubernetes.asc
     mode: '0644'
     force: false
-  become: true
-
-- name: Dearmor Kubernetes apt signing key
-  shell: gpg --dearmor < /tmp/kubernetes.gpg > /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-  args:
-    creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-  become: true
 
 - name: Add Kubernetes apt repository
-  copy:
+  ansible.builtin.copy:
     dest: /etc/apt/sources.list.d/kubernetes.list
-    content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/{{ kubernetes_series }}/deb/ /\n"
+    content: "deb [signed-by=/etc/apt/keyrings/kubernetes.asc] https://pkgs.k8s.io/core:/stable:/{{ kubernetes_series }}/deb/ /\n"
     mode: '0644'
-  become: true
 
 - name: Install containerd.io and Kubernetes packages
-  apt:
+  ansible.builtin.apt:
     name:
     - containerd.io
     - kubelet
@@ -115,41 +101,44 @@
     # apiserver itself is the thing that is down.
     - cri-tools
     state: present
-    update_cache: yes
+    update_cache: true
+    lock_timeout: 300
   environment:
     DEBIAN_FRONTEND: noninteractive
-  become: true
 
-- name: Hold Kubernetes packages at current version
-  dpkg_selections:
+- name: Hold Kubernetes packages at the installed version
+  ansible.builtin.dpkg_selections:
     name: "{{ item }}"
     selection: hold
-  become: true
-  loop:
-  - kubelet
-  - kubeadm
-  - kubectl
+  loop: [kubelet, kubeadm, kubectl]
 
-- name: Generate default containerd config (always overwrite to ensure CRI is enabled)
-  shell: containerd config default > /etc/containerd/config.toml
-  become: true
+# Docker's repo ships containerd 2.x, whose config format differs from 1.x.
+# The template below is written for 2.x; fail loudly rather than start a
+# runtime with a config it silently half-ignores.
+- name: Read the containerd version
+  ansible.builtin.command: containerd --version
+  register: containerd_version
+  changed_when: false
 
-- name: Configure containerd SystemdCgroup
-  replace:
-    path: /etc/containerd/config.toml
-    regexp: 'SystemdCgroup = false'
-    replace: 'SystemdCgroup = true'
-  become: true
+- name: Require containerd 2.x
+  ansible.builtin.assert:
+    that: containerd_version.stdout is search(' v2\.')
+    fail_msg: "Expected containerd 2.x from the Docker repo, got: {{ containerd_version.stdout }}"
+    quiet: true
 
-- name: Configure containerd sandbox_image
-  replace:
-    path: /etc/containerd/config.toml
-    regexp: 'sandbox_image = ".*"'
-    replace: 'sandbox_image = "registry.k8s.io/pause:3.10.1"'
-  become: true
+# Only the settings that differ from containerd's defaults. The previous
+# approach regex-patched `containerd config default`, but 2.x writes
+# config_path = '' (single quotes) and renamed sandbox_image, so the mirror
+# and pause-image edits never matched and every pull bypassed Zot.
+- name: Write the containerd config
+  ansible.builtin.template:
+    src: containerd-config.toml.j2
+    dest: /etc/containerd/config.toml
+    mode: '0644'
+  notify: Restart containerd
 
 - name: Write crictl config
-  copy:
+  ansible.builtin.copy:
     dest: /etc/crictl.yaml
     content: |
       runtime-endpoint: unix:///run/containerd/containerd.sock
@@ -157,7 +146,40 @@
       timeout: 10
       debug: false
     mode: '0644'
-  become: true
+
+# ── Container registry mirrors ───────────────────────────────────────────────
+# Plain HTTP: the registry is reachable only over the host-only network, and
+# using TLS here would mean distributing the homelab CA to every node before
+# the first image pull — the bootstrap circle Zot-on-the-host exists to break.
+# containerd falls back to the upstream when Zot is unreachable.
+- name: Create a certs.d directory per mirrored registry
+  ansible.builtin.file:
+    path: "/etc/containerd/certs.d/{{ item }}"
+    state: directory
+    mode: '0755'
+  loop: "{{ mirrored_registries | map(attribute='name') | list + [registry_host] }}"
+
+- name: Route each upstream through its prefix in Zot
+  ansible.builtin.template:
+    src: hosts.toml.j2
+    dest: "/etc/containerd/certs.d/{{ item.name }}/hosts.toml"
+    mode: '0644'
+  loop: "{{ mirrored_registries }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Restart containerd
+
+# For images referenced as 192.168.56.1:5000/... directly.
+- name: Allow plain-HTTP pulls straight from Zot
+  ansible.builtin.copy:
+    dest: "/etc/containerd/certs.d/{{ registry_host }}/hosts.toml"
+    content: |
+      server = "http://{{ registry_host }}"
+
+      [host."http://{{ registry_host }}"]
+        capabilities = ["pull", "resolve"]
+    mode: '0644'
+  notify: Restart containerd
 
 # Clear stale runtime state before a node first joins. Guarded on
 # kubelet.conf: unconditionally wiping /var/lib/containerd destroys every
@@ -168,91 +190,30 @@
     path: /etc/kubernetes/kubelet.conf
   register: kubelet_conf
 
-- name: Stop containerd before wiping state
-  systemd:
-    name: containerd
-    state: stopped
-  ignore_errors: true
+- name: Reset containerd state on a node that has not joined yet
   when: not kubelet_conf.stat.exists
+  block:
+  - name: Stop containerd
+    ansible.builtin.systemd:
+      name: containerd
+      state: stopped
 
-- name: Wipe containerd state database
-  file:
-    path: /var/lib/containerd
-    state: absent
-  become: true
-  when: not kubelet_conf.stat.exists
+  - name: Wipe its state
+    ansible.builtin.file:
+      path: /var/lib/containerd
+      state: absent
 
-- name: Reexec systemd
-  command: systemctl daemon-reexec
-  become: true
+- name: Restart containerd on config changes
+  ansible.builtin.meta: flush_handlers
 
-# ── Container registry mirrors ───────────────────────────────────────────────
-# Enable certs.d so containerd uses per-registry hosts.toml files.
-# Containerd falls back to the original registry if the mirror is unreachable.
-- name: Enable containerd registry config_path for certs.d
-  replace:
-    path: /etc/containerd/config.toml
-    regexp: 'config_path = ""'
-    replace: 'config_path = "/etc/containerd/certs.d"'
-  become: true
-
-- name: Create containerd certs.d registry directories
-  file:
-    path: "/etc/containerd/certs.d/{{ item.name }}"
-    state: directory
-    mode: '0755'
-  become: true
-  loop: "{{ mirrored_registries }}"
-  loop_control:
-    label: "{{ item.name }}"
-
-# Plain HTTP: the registry is reachable only over the host-only network, and
-# using TLS here would mean distributing the homelab CA to every node before
-# the first image pull — which is the bootstrap circle this whole move exists
-# to break.
-- name: Configure containerd mirrors through the host registry
-  copy:
-    dest: "/etc/containerd/certs.d/{{ item.name }}/hosts.toml"
-    mode: '0644'
-    content: |
-      server = "{{ item.upstream }}"
-
-      [host."http://{{ host_ip }}:{{ registry_port }}"]
-        capabilities = ["pull", "resolve"]
-  become: true
-  loop: "{{ mirrored_registries }}"
-  loop_control:
-    label: "{{ item.name }}"
-
-# Lets image references written against the registry directly (rather than
-# through a mirrored upstream) resolve without TLS.
-- name: Create certs.d directory for the host registry itself
-  file:
-    path: "/etc/containerd/certs.d/{{ host_ip }}:{{ registry_port }}"
-    state: directory
-    mode: '0755'
-  become: true
-
-- name: Allow insecure pushes and pulls direct to the host registry
-  copy:
-    dest: /etc/containerd/certs.d/{{ host_ip }}:{{ registry_port }}/hosts.toml
-    mode: '0644'
-    content: |
-      server = "http://{{ host_ip }}:{{ registry_port }}"
-
-      [host."http://{{ host_ip }}:{{ registry_port }}"]
-        capabilities = ["pull", "resolve", "push"]
-  become: true
-# ─────────────────────────────────────────────────────────────────────────────
-
-- name: Restart and enable containerd
-  systemd:
+- name: Enable and start containerd
+  ansible.builtin.systemd:
     name: containerd
-    state: restarted
+    state: started
     enabled: true
 
-- name: Install wait-for-hostonly systemd service (ensures the host-only NIC is up before kubelet)
-  copy:
+- name: Install wait-for-hostonly systemd service (host-only NIC up before kubelet)
+  ansible.builtin.copy:
     dest: /etc/systemd/system/wait-for-hostonly.service
     mode: '0644'
     content: |
@@ -269,29 +230,26 @@
 
       [Install]
       WantedBy=multi-user.target
-  become: true
 
 - name: Enable wait-for-hostonly service
-  systemd:
+  ansible.builtin.systemd:
     name: wait-for-hostonly.service
     enabled: true
     daemon_reload: true
-  become: true
 
 # Without --node-ip kubelet registers the NAT interface, which is 10.0.2.15 on
 # every VM. All three nodes then report the same InternalIP and the apiserver
 # reaches the wrong kubelet for logs, exec and metrics.
 - name: Register kubelet against the host-only address
-  copy:
+  ansible.builtin.copy:
     dest: /etc/default/kubelet
     content: |
-      KUBELET_EXTRA_ARGS=--node-ip={{ hostvars[inventory_hostname].ansible_host }}{{ ' --fail-swap-on=false' if node_role == 'master' else '' }}
+      KUBELET_EXTRA_ARGS=--node-ip={{ hostvars[inventory_hostname].ansible_host }}
     mode: '0644'
-  become: true
   notify: Restart kubelet
 
 - name: Enable and start kubelet
-  systemd:
+  ansible.builtin.systemd:
     name: kubelet
-    enabled: yes
+    enabled: true
     state: started

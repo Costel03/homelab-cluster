@@ -8,13 +8,19 @@ export ANSIBLE_CONFIG := $(CURDIR)/ansible.cfg
 PLAYBOOK := ansible-playbook
 EXTRA    ?=
 
-.PHONY: all registry vms cluster apps vault trust-ca destroy check deps inventory
+.PHONY: all registry runner vms cluster apps vault trust-ca destroy check deps inventory
 
-all: ## Registry, VMs, Kubernetes, ArgoCD
-	$(PLAYBOOK) playbooks/site.yml $(EXTRA)
+all: ## Registry, runner, VMs, Kubernetes, ArgoCD, Vault
+	$(PLAYBOOK) playbooks/site.yml -e runner_token=$(RUNNER_TOKEN) $(EXTRA)
 
 registry: ## Zot pull-through cache in WSL
 	$(PLAYBOOK) playbooks/registry.yml $(EXTRA)
+
+# RUNNER_TOKEN is only needed the first time; it is single-use and expires
+# after an hour. Get one from the repo's Settings > Actions > Runners.
+RUNNER_TOKEN ?=
+runner: ## GitHub Actions runner in WSL (first run: RUNNER_TOKEN=...)
+	$(PLAYBOOK) playbooks/runner.yml -e runner_token=$(RUNNER_TOKEN) $(EXTRA)
 
 vms: ## Create and boot the VirtualBox VMs
 	$(PLAYBOOK) playbooks/vms.yml $(EXTRA)

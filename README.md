@@ -1,23 +1,25 @@
 # homelab-cluster
 
 Builds the homelab from nothing: three VirtualBox VMs, a kubeadm cluster on
-them, and a local image cache. All Ansible, no Vagrant.
+them, the Zot registry and a GitHub Actions runner in WSL. All Ansible, no
+Vagrant.
 
-What runs *in* the cluster lives in [homelab-gitops](https://github.com/Costel03/homelab-gitops)
-and is reconciled by ArgoCD.
+What runs *in* the cluster lives in [homelab-gitops](https://github.com/Costel03/homelab-gitops),
+is verified and published to Zot by its CI, and is reconciled by ArgoCD.
 
 ## Run it
 
 ```bash
-make deps        # once — installs the kubernetes.core collection
-make all         # registry, VMs, Kubernetes, ArgoCD
+make deps        # once — installs the Ansible collections
+make all         # registry, runner, VMs, Kubernetes, ArgoCD, Vault
 ```
 
 Stages are independent:
 
 | Target | Does |
 |---|---|
-| `make registry` | Zot pull-through cache in WSL + the Windows port proxy |
+| `make registry` | Zot in WSL (pull-through cache + CI's registry) and the Windows port proxy |
+| `make runner` | GitHub Actions runner in WSL; first time needs `RUNNER_TOKEN=...` |
 | `make vms` | Creates and boots the VMs, waits for SSH |
 | `make cluster` | containerd, kubeadm init/join, Calico, fetches the kubeconfig |
 | `make apps` | MetalLB, ArgoCD, applies the app-of-apps |
@@ -31,6 +33,25 @@ Stages are independent:
 > is world-writable from WSL — without it the playbooks silently run against
 > whatever `~/.ansible.cfg` points at.
 
+Every stage is safe to re-run. `make cluster` on a healthy cluster changes
+nothing: workers only join when the control plane does not know them, and the
+control plane is only rebuilt with `-e force_reinit=true`.
+
+## First build
+
+ArgoCD follows homelab-gitops' `deployed` branch, which CI creates the first
+time it publishes. So the very first time, the order is:
+
+| Step | Command |
+|---|---|
+| 1. Zot and the runner | `make registry runner RUNNER_TOKEN=<token>` — token from homelab-gitops > Settings > Actions > Runners > New self-hosted runner (single use, 1 h) |
+| 2. Fill Zot | homelab-gitops > Actions > publish > Run workflow, tick *all* |
+| 3. The cluster | `make vms cluster apps vault` |
+| 4. Admin passwords | homelab-gitops' `scripts/seed-vault-secrets.sh` |
+
+After that, `make all` rebuilds everything in one go: Zot and `deployed`
+outlive the VMs.
+
 ## Changing the VMs
 
 Sizing is per group, so both workers stay identical:
@@ -39,10 +60,10 @@ Sizing is per group, so both workers stay identical:
 |---|---|
 | `inventory/group_vars/masters.yml` | control-plane CPU / memory / disk |
 | `inventory/group_vars/workers.yml` | worker CPU / memory / disk |
-| `inventory/group_vars/all.yml` | network, versions, registry, GitOps repo |
+| `inventory/group_vars/all.yml` | network, versions, registry, runner, GitOps repo |
 | `inventory/hosts.yml` | which nodes exist and their addresses |
 
-Current allocation is 12 vCPU and 20 GB of the host's 22 / 32.
+Current allocation is 12 vCPU and 18 GB of the host's 22 / 32.
 
 Adding a worker is an entry in `hosts.yml` under `workers:` plus `make vms` —
 it inherits the group sizing, and only the new VM is created.
@@ -51,7 +72,7 @@ Per-node overrides go in `inventory/host_vars/<name>.yml`.
 
 ## How a VM is built
 
-1. `vm_image` downloads the Ubuntu 26.04 cloud image once, checks its SHA256,
+1. `vm_image` downloads the Ubuntu 24.04 cloud image once, checks its SHA256,
    converts it to a VDI and stages it for VirtualBox.
 2. `virtualbox_vm` full-clones that VDI per node, resizes it, and attaches a
    cloud-init seed ISO carrying the hostname, SSH key and static IP.
@@ -89,25 +110,56 @@ prints them at the end.
 
 Zot runs as a systemd service in WSL, not in the cluster — an in-cluster
 registry cannot serve the images needed to start itself, so it never helped a
-cold rebuild. It is an on-demand pull-through cache: nothing needs pushing
-into it, and containerd falls back to the upstreams if it is down.
+cold rebuild. It does two jobs:
+
+| Job | How |
+|---|---|
+| CI's registry | homelab-gitops' publish workflow pushes scanned images to `scanned/<registry>/...` and Helm charts to `charts/`. |
+| Pull-through cache | Each upstream is cached under its own prefix: `docker.io/...`, `quay.io/...`, `registry.k8s.io/...`, `ghcr.io/...`, ECR Public. |
+
+containerd on every node routes those registries through Zot
+(`override_path` in `certs.d/<registry>/hosts.toml`): the scanned copy first,
+then the cache, then the upstream itself if Zot is down. So a node pulling
+`quay.io/x:1.0` runs the digest CI scanned when there is one.
+
+Pulls are anonymous. Pushing needs the `ci` user, whose password is generated
+on the first run into `~/.config/homelab/zot-ci.password` and handed to the
+runner. Zot also scans everything it stores for CVEs, including bootstrap
+images CI never sees — browse `http://192.168.56.1:5000`.
 
 WSL is NAT'd, so `make registry` also forwards `192.168.56.1:5000` to it. That
 **triggers a UAC prompt** — `netsh portproxy` and the firewall rule need
 Administrator. WSL changes address on every restart, so re-run `make registry`
 after `wsl --shutdown`.
 
+## CI runner
+
+A GitHub Actions runner for homelab-gitops runs as the unprivileged
+`gh-runner` user in WSL (no sudo, no docker group), next to Zot, so the publish
+workflow can push to `localhost:5000` without the registry ever being exposed.
+Only that workflow uses it; pull-request checks run on GitHub-hosted runners.
+
+The runner and Zot only run while WSL does. WSL stops a distro shortly after
+its last terminal closes, so either keep one open or, in
+`%UserProfile%\.wslconfig`:
+
+```ini
+[wsl2]
+vmIdleTimeout=-1
+```
+
 ## Requirements
 
 WSL Ubuntu with systemd, plus:
 
 ```bash
-sudo apt-get install -y qemu-utils cloud-image-utils make python3-kubernetes
-ansible-galaxy collection install -r requirements.yml
+sudo apt-get install -y qemu-utils cloud-image-utils make python3-passlib python3-bcrypt
+make deps
 ```
 
-`python3-kubernetes` is the Python library behind the `kubernetes.core` modules —
-the collection alone is not enough, and the apps stage fails without it.
+passlib and bcrypt hash Zot's htpasswd entry. The Kubernetes steps call
+`kubectl` and `helm` directly, so the Python `kubernetes` client is not needed
+(Ubuntu 24.04 packages 22.6, older than `kubernetes.core` accepts).
 
 VirtualBox 7.x on Windows with a host-only adapter holding `192.168.56.1`.
 Confirm which one that is and set `vbox_hostonly_adapter` in

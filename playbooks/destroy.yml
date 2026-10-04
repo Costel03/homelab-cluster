@@ -28,6 +28,7 @@
       ansible.builtin.command:
         argv: ['{{ vbox_manage }}', controlvm, '{{ inventory_hostname }}', poweroff]
       failed_when: false
+      changed_when: true
 
     # VirtualBox needs a moment to release the disk lock.
     - name: Wait for the lock to clear
@@ -37,3 +38,4 @@
     - name: Unregister and delete
       ansible.builtin.command:
         argv: ['{{ vbox_manage }}', unregistervm, '{{ inventory_hostname }}', --delete]
+      changed_when: true

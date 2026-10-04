@@ -1,0 +1,15 @@
+server = "{{ item.upstream }}"
+
+# Tried in order; a 404 falls through to the next, then to the upstream.
+# override_path: the URL path is the API root, so a pull of
+# {{ item.name }}/<repo> asks for /v2/scanned/{{ item.name }}/<repo>, and so on.
+
+# Images homelab-gitops' CI scanned and published.
+[host."http://{{ registry_host }}/v2/scanned/{{ item.name }}"]
+  capabilities = ["pull", "resolve"]
+  override_path = true
+
+# Zot's pull-through cache of the upstream.
+[host."http://{{ registry_host }}/v2/{{ item.name }}"]
+  capabilities = ["pull", "resolve"]
+  override_path = true

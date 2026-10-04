@@ -1,11 +1,30 @@
 ---
 argocd_values:
+  configs:
+    cm:
+      # Poll the GitOps repo every minute: GitHub cannot reach a webhook on the
+      # host-only network, so polling is the only trigger.
+      timeout.reconciliation: 60s
+      # Since 1.8 an Application has no health of its own, so sync waves in an
+      # app-of-apps only order creation and never wait. This restores it: a
+      # wave now waits until the Applications before it are Healthy.
+      resource.customizations.health.argoproj.io_Application: |
+        hs = {}
+        hs.status = "Progressing"
+        hs.message = ""
+        if obj.status ~= nil and obj.status.health ~= nil then
+          hs.status = obj.status.health.status
+          if obj.status.health.message ~= nil then
+            hs.message = obj.status.health.message
+          end
+        end
+        return hs
   server:
     replicas: 1
     service:
       type: LoadBalancer
       annotations:
-        metallb.universe.tf/loadBalancerIPs: 192.168.56.20
+        metallb.io/loadBalancerIPs: 192.168.56.20
     ingress:
       enabled: false
     resources:

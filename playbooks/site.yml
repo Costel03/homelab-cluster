@@ -1,8 +1,15 @@
 ---
 # Everything, in order. Individual stages can be run on their own —
 # see the README.
-- ansible.builtin.import_playbook: registry.yml
-- ansible.builtin.import_playbook: vms.yml
-- ansible.builtin.import_playbook: cluster.yml
-- ansible.builtin.import_playbook: apps.yml
-- ansible.builtin.import_playbook: vault.yml
+- name: Zot registry
+  ansible.builtin.import_playbook: registry.yml
+- name: GitHub Actions runner
+  ansible.builtin.import_playbook: runner.yml
+- name: VirtualBox VMs
+  ansible.builtin.import_playbook: vms.yml
+- name: Kubernetes
+  ansible.builtin.import_playbook: cluster.yml
+- name: MetalLB, ArgoCD and the app-of-apps
+  ansible.builtin.import_playbook: apps.yml
+- name: Vault and the homelab CA
+  ansible.builtin.import_playbook: vault.yml

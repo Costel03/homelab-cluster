@@ -1,0 +1,167 @@
+---
+# A self-hosted runner in WSL, next to Zot: the publish workflow pushes to
+# localhost:5000, so the registry never has to be reachable from the internet.
+# It runs as an unprivileged user — no sudo, no docker group — so a job cannot
+# take over the host. Registration needs a one-time token:
+#   GitHub > homelab-gitops > Settings > Actions > Runners > New self-hosted runner
+#   make runner RUNNER_TOKEN=<token>
+
+- name: Create the runner user
+  ansible.builtin.user:
+    name: "{{ github_runner_user }}"
+    system: true
+    home: "{{ github_runner_home }}"
+    create_home: true
+    shell: /bin/bash
+  become: true
+
+- name: Create the runner directory
+  ansible.builtin.file:
+    path: "{{ github_runner_dir }}"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: '0755'
+  become: true
+
+- name: Download the runner
+  ansible.builtin.get_url:
+    url: "https://github.com/actions/runner/releases/download/v{{ github_runner_version }}/actions-runner-linux-x64-{{ github_runner_version }}.tar.gz"
+    dest: "{{ github_runner_dir }}/actions-runner-{{ github_runner_version }}.tar.gz"
+    checksum: "sha256:{{ github_runner_sha256 }}"
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: '0644'
+  become: true
+
+# Unpacked once. The runner updates itself afterwards, and GitHub stops
+# sending jobs to runners that fall too far behind, so that is left on.
+- name: Unpack it
+  ansible.builtin.unarchive:
+    src: "{{ github_runner_dir }}/actions-runner-{{ github_runner_version }}.tar.gz"
+    dest: "{{ github_runner_dir }}"
+    remote_src: true
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    creates: "{{ github_runner_dir }}/config.sh"
+  become: true
+
+- name: Install the runner's OS dependencies
+  ansible.builtin.shell: >-
+    {{ github_runner_dir }}/bin/installdependencies.sh
+    && touch /var/lib/actions-runner-deps-installed
+  args:
+    creates: /var/lib/actions-runner-deps-installed
+  become: true
+
+- name: Check whether the runner is registered
+  ansible.builtin.stat:
+    path: "{{ github_runner_dir }}/.runner"
+  register: runner_registered
+
+- name: Skip registration when no token was given
+  when:
+  - not runner_registered.stat.exists
+  - runner_token | default('') | length == 0
+  block:
+  - name: Explain how to register it
+    ansible.builtin.debug:
+      msg: >-
+        The runner is not registered, so the publish workflow has nowhere to run.
+        Get a token from https://github.com/{{ github_runner_repo }}/settings/actions/runners/new
+        and run: make runner RUNNER_TOKEN=<token>
+
+  - name: Stop here
+    ansible.builtin.meta: end_role
+
+- name: Register the runner with GitHub
+  ansible.builtin.command:
+    argv:
+    - runuser
+    - -u
+    - "{{ github_runner_user }}"
+    - --
+    - ./config.sh
+    - --unattended
+    - --url
+    - "https://github.com/{{ github_runner_repo }}"
+    - --token
+    - "{{ runner_token }}"
+    - --name
+    - "{{ github_runner_name }}"
+    - --labels
+    - "{{ github_runner_labels | join(',') }}"
+    - --work
+    - _work
+    - --replace
+    chdir: "{{ github_runner_dir }}"
+  become: true
+  when: not runner_registered.stat.exists
+  changed_when: true
+  no_log: true
+
+- name: Create the runner's config directory
+  ansible.builtin.file:
+    path: "{{ github_runner_home }}/.config/zot"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: '0700'
+  become: true
+
+- name: Give the runner the Zot push password
+  ansible.builtin.copy:
+    content: "{{ lookup('ansible.builtin.file', zot_ci_password_file) }}"
+    dest: "{{ github_runner_home }}/.config/zot/password"
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: '0400'
+  become: true
+  no_log: true
+
+# The runner reads .env at start and exposes it to every job, so workflows
+# find the registry without it being hard-coded in homelab-gitops.
+- name: Tell jobs where Zot is
+  ansible.builtin.lineinfile:
+    path: "{{ github_runner_dir }}/.env"
+    regexp: "^{{ item.key }}="
+    line: "{{ item.key }}={{ item.value }}"
+    create: true
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: '0644'
+  loop:
+  - { key: ZOT_REGISTRY, value: "localhost:{{ registry_port }}" }
+  - { key: ZOT_USER, value: "{{ zot_ci_user }}" }
+  - { key: ZOT_PASSWORD_FILE, value: "{{ github_runner_home }}/.config/zot/password" }
+  loop_control:
+    label: "{{ item.key }}"
+  become: true
+  notify: Restart the runner
+
+- name: Put the service wrapper where the unit expects it
+  ansible.builtin.copy:
+    src: "{{ github_runner_dir }}/bin/runsvc.sh"
+    dest: "{{ github_runner_dir }}/runsvc.sh"
+    remote_src: true
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: '0755'
+  become: true
+  notify: Restart the runner
+
+- name: Install the systemd unit
+  ansible.builtin.template:
+    src: actions-runner.service.j2
+    dest: "/etc/systemd/system/{{ github_runner_service }}.service"
+    mode: '0644'
+  become: true
+  notify: Restart the runner
+
+- name: Enable and start the runner
+  ansible.builtin.systemd:
+    name: "{{ github_runner_service }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true

@@ -3,6 +3,28 @@
 # Service is a LoadBalancer, so it stays Pending until MetalLB exists, and
 # ArgoCD cannot install itself. Everything else is declared in homelab-gitops
 # and reconciled from there.
+#
+# Manifests go through kubectl rather than kubernetes.core.k8s: that module
+# needs the Python kubernetes client >= 24.2 on the controller, and Ubuntu
+# 24.04 only packages 22.6.
+
+# ArgoCD tracks the branch CI moves after publishing to Zot. Until the publish
+# workflow has run once it does not exist, and every Application would sit in
+# ComparisonError.
+- name: Check that CI has published at least once
+  ansible.builtin.command:
+    argv: [git, ls-remote, --exit-code, --heads, '{{ gitops_repo_url }}', '{{ gitops_repo_revision }}']
+  register: gitops_branch
+  changed_when: false
+  failed_when: false
+
+- name: Stop if there is nothing for ArgoCD to sync yet
+  ansible.builtin.fail:
+    msg: >-
+      {{ gitops_repo_url }} has no '{{ gitops_repo_revision }}' branch. Push homelab-gitops and
+      let the publish workflow run once (Actions > publish > Run workflow, all apps) so the
+      charts and images are in Zot, then re-run make apps.
+  when: gitops_branch.rc != 0
 
 - name: Install MetalLB
   kubernetes.core.helm:
@@ -15,12 +37,6 @@
     wait: true
     wait_timeout: 10m
 
-- name: Render the MetalLB address pool
-  ansible.builtin.template:
-    src: metallb-resources.yaml.j2
-    dest: /tmp/metallb-resources.yaml
-    mode: '0644'
-
 # The pool and advertisement are plain CRs, so they can only be applied once
 # MetalLB's CRDs are established.
 - name: Wait for the MetalLB CRDs
@@ -29,9 +45,15 @@
   changed_when: false
 
 - name: Apply the MetalLB address pool
-  kubernetes.core.k8s:
-    src: /tmp/metallb-resources.yaml
-    state: present
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, '-']
+    stdin: "{{ lookup('ansible.builtin.template', 'metallb-resources.yaml.j2') }}"
+  register: metallb_pool_apply
+  changed_when: "' created' in metallb_pool_apply.stdout or ' configured' in metallb_pool_apply.stdout"
+  # MetalLB's webhook can lag its Deployment's readiness by a few seconds.
+  retries: 6
+  delay: 10
+  until: metallb_pool_apply.rc == 0
 
 - name: Install ArgoCD
   kubernetes.core.helm:
@@ -50,13 +72,9 @@
     argv: [kubectl, wait, --for, condition=Established, crd/applications.argoproj.io, --timeout=120s]
   changed_when: false
 
-- name: Render the app-of-apps
-  ansible.builtin.template:
-    src: app-of-apps.yaml.j2
-    dest: /tmp/app-of-apps.yaml
-    mode: '0644'
-
 - name: Hand the rest of the cluster to ArgoCD
-  kubernetes.core.k8s:
-    src: /tmp/app-of-apps.yaml
-    state: present
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, '-']
+    stdin: "{{ lookup('ansible.builtin.template', 'app-of-apps.yaml.j2') }}"
+  register: app_of_apps_apply
+  changed_when: "' created' in app_of_apps_apply.stdout or ' configured' in app_of_apps_apply.stdout"

@@ -17,7 +17,11 @@ pod_subnet: 10.244.0.0/16
 api_advertise_address: 192.168.56.10
 
 registry_port: 5000
+registry_host: "{{ host_ip }}:{{ registry_port }}"
 zot_version: v2.1.21
+# Each upstream is cached under its own prefix in Zot (docker.io/library/nginx,
+# quay.io/jetstack/...), so a name on one registry can never be served for a
+# pull meant for another. CI pushes scanned images to the same paths.
 mirrored_registries:
 - name: docker.io
   upstream: https://registry-1.docker.io
@@ -27,9 +31,19 @@ mirrored_registries:
   upstream: https://quay.io
 - name: registry.k8s.io
   upstream: https://registry.k8s.io
+- name: public.ecr.aws
+  upstream: https://public.ecr.aws
+# ArgoCD's chart pulls Redis from ECR Public's newer hostname.
+- name: ecr-public.aws.com
+  upstream: https://ecr-public.aws.com
+# Pulls are anonymous; only this user can push. The password is generated on
+# first run and kept here, outside the repo.
+zot_ci_user: ci
+zot_ci_password_file: "{{ lookup('env', 'HOME') }}/.config/homelab/zot-ci.password"
 
 kubernetes_series: v1.35
-calico_version: v3.29.1
+# First Calico line tested against Kubernetes 1.35.
+calico_version: v3.33.0
 
 cloud_image_url: https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img
 cloud_image_checksums: https://cloud-images.ubuntu.com/releases/24.04/release/SHA256SUMS
@@ -39,7 +53,16 @@ argocd_chart_version: 10.9.2
 metallb_chart_version: 0.15.3
 metallb_pool: 192.168.56.20-192.168.56.40
 gitops_repo_url: https://github.com/Costel03/homelab-gitops.git
-gitops_repo_revision: main
+# CI moves this branch only after an app's chart and images are scanned and in
+# Zot, so ArgoCD never syncs something the pipeline has not published.
+gitops_repo_revision: deployed
+
+# Self-hosted runner in WSL, next to Zot. Registered against one repo.
+github_runner_repo: Costel03/homelab-gitops
+github_runner_version: 2.337.0
+github_runner_sha256: 70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613
+github_runner_name: wsl-zot
+github_runner_labels: [zot]
 
 # Vault's root token and unseal key. Written once at init and never
 # recoverable afterwards.

@@ -1,56 +1,53 @@
 ---
-- name: Reset kubeadm on the worker node (safe retry setup)
-  become: true
-  command: kubeadm reset -f
-  ignore_errors: true
+# Only (re)join a worker that is not already part of the cluster. This used to
+# reset and re-join every worker on every run, which evicted every pod on them
+# whenever `make cluster` was re-run against a healthy cluster.
 
-- name: Delete stale node object from API server (allows clean re-join)
-  delegate_to: master
-  become: true
-  shell: |
-    kubectl --kubeconfig=/etc/kubernetes/admin.conf \
-      delete node {{ inventory_hostname }} --ignore-not-found=true
+- name: Check for a kubelet config from a previous join
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: worker_kubelet_conf
+
+- name: Ask the control plane whether it knows this node
+  ansible.builtin.command:
+    argv: [kubectl, --kubeconfig, /etc/kubernetes/admin.conf, get, node, '{{ inventory_hostname }}', -o, name]
+  delegate_to: "{{ groups['masters'][0] }}"
+  register: worker_node_known
+  failed_when: false
   changed_when: false
 
-- name: Remove old CNI configuration (for a clean state)
-  become: true
-  file:
-    path: /etc/cni/net.d
-    state: absent
+- name: Join the cluster
+  when: >-
+    not worker_kubelet_conf.stat.exists
+    or worker_node_known.rc != 0
+    or (force_rejoin | default(false) | bool)
+  block:
+  - name: Reset any half-finished join
+    ansible.builtin.command: kubeadm reset -f
+    changed_when: true
 
-- name: Stop containerd to wipe stale linked-clone state
-  become: true
-  systemd:
-    name: containerd
-    state: stopped
+  - name: Delete a stale node object so the join is clean
+    ansible.builtin.command:
+      argv: [kubectl, --kubeconfig, /etc/kubernetes/admin.conf, delete, node, '{{ inventory_hostname }}', --ignore-not-found=true]
+    delegate_to: "{{ groups['masters'][0] }}"
+    changed_when: false
 
-- name: Wipe containerd state database (removes stale clone artifacts)
-  become: true
-  file:
-    path: /var/lib/containerd
-    state: absent
+  - name: Remove old CNI configuration
+    ansible.builtin.file:
+      path: /etc/cni/net.d
+      state: absent
 
-- name: Start containerd with clean state
-  become: true
-  systemd:
-    name: containerd
-    state: started
-    enabled: true
+  - name: Join Kubernetes cluster
+    ansible.builtin.command: "{{ hostvars[groups['masters'][0]].kubeadm_join_command.stdout }}"
+    changed_when: true
 
-- name: Join Kubernetes cluster
-  become: true
-  shell: "{{ hostvars[groups['masters'][0]].kubeadm_join_command.stdout }}"
-  args:
-    creates: /etc/kubernetes/kubelet.conf
-
-- name: Wait for kubelet to register this node with the control plane
-  become: true
-  wait_for:
-    path: /etc/kubernetes/kubelet.conf
-    timeout: 60
+  - name: Wait for kubelet to register with the control plane
+    ansible.builtin.wait_for:
+      path: /etc/kubernetes/kubelet.conf
+      timeout: 120
 
 - name: Create .kube directory for the node user
-  file:
+  ansible.builtin.file:
     path: /home/{{ node_user }}/.kube
     state: directory
     mode: '0755'

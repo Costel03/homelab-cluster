@@ -39,6 +39,7 @@
   - name: Register the VM with VirtualBox
     ansible.builtin.command:
       argv: ['{{ vbox_manage }}', createvm, --name, '{{ vm_name }}', --ostype, Ubuntu_64, --register]
+    changed_when: true
 
   - name: Clone the base disk
     ansible.builtin.command:
@@ -50,6 +51,7 @@
       - "{{ vm_dir_win }}/{{ vm_name }}.vdi"
       - --format
       - VDI
+    changed_when: true
 
   - name: Resize the disk
     ansible.builtin.command:
@@ -60,6 +62,7 @@
       - "{{ vm_dir_win }}/{{ vm_name }}.vdi"
       - --resize
       - "{{ vm_disk_gb | int * 1024 }}"
+    changed_when: true
 
   # Cloning registers the base disk in VirtualBox's media registry; leaving it
   # there makes the next clone fail with a UUID conflict.
@@ -67,6 +70,7 @@
     ansible.builtin.command:
       argv: ['{{ vbox_manage }}', closemedium, disk, '{{ base_vdi_win }}']
     failed_when: false
+    changed_when: true
 
   - name: Render the cloud-init files
     ansible.builtin.template:
@@ -82,6 +86,7 @@
       - "{{ image_cache_dir }}/{{ vm_name }}-seed.iso"
       - "{{ image_cache_dir }}/user-data"
       - "{{ image_cache_dir }}/meta-data"
+    changed_when: true
 
   - name: Place the seed ISO next to the VM
     ansible.builtin.copy:
@@ -121,6 +126,7 @@
       - '{{ vbox_hostonly_adapter }}'
       - --macaddress2
       - '{{ vm_mac }}'
+    changed_when: true
 
   # hostiocache=on: without it every guest fsync goes straight to the laptop
   # disk, etcd sees 200-350ms apply latency with three VMs running, and the
@@ -141,6 +147,7 @@
       - '2'
       - --hostiocache
       - 'on'
+    changed_when: true
 
   - name: Attach the disk
     ansible.builtin.command:
@@ -158,6 +165,7 @@
       - hdd
       - --medium
       - "{{ vm_dir_win }}/{{ vm_name }}.vdi"
+    changed_when: true
 
   - name: Attach the seed ISO
     ansible.builtin.command:
@@ -175,6 +183,7 @@
       - dvddrive
       - --medium
       - "{{ vm_dir_win }}/seed.iso"
+    changed_when: true
 
 # Sizing is only applied by modifyvm at creation, so editing group_vars would
 # otherwise have no effect on a VM that already exists. Reconcile it instead,
@@ -223,6 +232,7 @@
         - sudo shutdown -h now
       failed_when: false
       when: vm_is_running
+      changed_when: true
 
     - name: Wait for it to stop
       ansible.builtin.command:
@@ -241,6 +251,7 @@
       when:
       - vm_is_running
       - still_running.stdout_lines | select('match', '^"' ~ vm_name ~ '"') | list | length > 0
+      changed_when: true
 
     - name: Let VirtualBox release the disk lock
       ansible.builtin.pause:
@@ -257,6 +268,7 @@
         - "{{ vm_memory_mb }}"
         - --cpus
         - "{{ vm_cpus }}"
+      changed_when: true
 
     - name: Note that it must be started again
       ansible.builtin.set_fact:
@@ -272,3 +284,4 @@
   when:
   - not vm_is_running
   - vm_autostart | default(true) | bool
+  changed_when: true

@@ -1,0 +1,7 @@
+---
+- name: Install the GitHub Actions runner in WSL
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  roles:
+  - github_runner

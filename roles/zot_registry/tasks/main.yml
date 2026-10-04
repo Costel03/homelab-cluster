@@ -45,11 +45,32 @@
   loop_control:
     label: "{{ item.path }}"
 
+# Generated once and kept outside the repo; the runner role hands it to the
+# CI user. Pulls stay anonymous, so nodes and ArgoCD need no credentials.
+- name: Read or generate the CI push password
+  ansible.builtin.set_fact:
+    zot_ci_password: "{{ lookup('ansible.builtin.password', zot_ci_password_file ~ ' chars=ascii_letters,digits length=40') }}"
+  no_log: true
+
+- name: Write the htpasswd entry for the CI user
+  community.general.htpasswd:
+    path: /etc/zot/htpasswd
+    name: "{{ zot_ci_user }}"
+    password: "{{ zot_ci_password }}"
+    hash_scheme: bcrypt
+    owner: root
+    group: zot
+    mode: '0640'
+  become: true
+  no_log: true
+  notify: Restart zot
+
 - name: Write the zot config
   ansible.builtin.template:
     src: config.json.j2
     dest: /etc/zot/config.json
     mode: '0644'
+    validate: /usr/local/bin/zot verify %s
   become: true
   notify: Restart zot
 

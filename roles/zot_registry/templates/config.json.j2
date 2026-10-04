@@ -1,5 +1,5 @@
 {
-  "distSpecVersion": "1.1.0",
+  "distSpecVersion": "1.1.1",
   "storage": {
     "rootDirectory": "/var/lib/zot",
     "gc": true,
@@ -8,13 +8,30 @@
   },
   "http": {
     "address": "0.0.0.0",
-    "port": "{{ registry_port }}"
+    "port": "{{ registry_port }}",
+    "auth": {
+      "htpasswd": { "path": "/etc/zot/htpasswd" },
+      "failDelay": 1
+    },
+    "accessControl": {
+      "repositories": {
+        "**": {
+          "anonymousPolicy": ["read"],
+          "policies": [
+            { "users": ["{{ zot_ci_user }}"], "actions": ["read", "create", "update", "delete"] }
+          ]
+        }
+      }
+    }
   },
   "log": {
     "level": "info"
   },
   "extensions": {
-    "search": { "enable": true },
+    "search": {
+      "enable": true,
+      "cve": { "updateInterval": "24h" }
+    },
     "ui": { "enable": true },
     "sync": {
       "enable": true,
@@ -22,7 +39,7 @@
 {% for reg in mirrored_registries %}
         {
           "urls": ["{{ reg.upstream }}"],
-          "content": [{ "prefix": "**" }],
+          "content": [{ "prefix": "**", "destination": "/{{ reg.name }}" }],
           "onDemand": true,
           "tlsVerify": true,
           "maxRetries": 3,

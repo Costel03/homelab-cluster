@@ -1,0 +1,13 @@
+---
+profile: production
+
+exclude_paths:
+- .github/
+
+# Every command in this repo drives VBoxManage, kubeadm or kubectl, which have
+# no idempotent Ansible module; changed_when is set on each instead.
+skip_list:
+- command-instead-of-module
+# The role-prefix convention protects Galaxy roles from colliding with their
+# callers' variables. These roles only ever run from this repo's playbooks.
+- var-naming[no-role-prefix]

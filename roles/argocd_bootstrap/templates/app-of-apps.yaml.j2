@@ -10,15 +10,15 @@ spec:
   source:
     repoURL: {{ gitops_repo_url }}
     targetRevision: {{ gitops_repo_revision }}
-    path: app-of-apps
+    path: apps
     helm:
-      valueFiles:
-      - values.yaml
       parameters:
       - name: repo.url
         value: {{ gitops_repo_url }}
       - name: repo.revision
         value: {{ gitops_repo_revision }}
+      - name: registry.host
+        value: "{{ registry_host }}"
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
@@ -28,3 +28,9 @@ spec:
       selfHeal: true
     syncOptions:
     - CreateNamespace=true
+    retry:
+      limit: -1
+      backoff:
+        duration: 30s
+        maxDuration: 5m
+        factor: 2
