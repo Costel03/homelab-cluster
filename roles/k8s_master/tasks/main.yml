@@ -165,28 +165,35 @@
     mode: '0600'
 
 # ── Calico ───────────────────────────────────────────────────────────────────
+# Kept unedited: get_url re-downloads a file GitHub serves without
+# Last-Modified, so editing it in place made every run fetch, re-edit and
+# re-apply it.
 - name: Download the Calico manifest
   ansible.builtin.get_url:
     url: https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico.yaml
-    dest: /root/calico-{{ calico_version }}.yaml
+    dest: /root/calico-{{ calico_version }}.orig.yaml
     mode: '0644'
-  register: calico_download
+
+- name: Read it
+  ansible.builtin.slurp:
+    src: /root/calico-{{ calico_version }}.orig.yaml
+  register: calico_orig
 
 # Set before the first calico-node starts. Patching the DaemonSet afterwards
 # raced it: the first pods autodetected the NAT NIC (10.0.2.15 on every node)
-# and the default pool is created once and never changed.
+# and the default pool is created once and never changed. mandatory_count
+# fails the task if Calico ever reworks the commented block this replaces.
 - name: Pin the pod CIDR and the address Calico peers on
-  ansible.builtin.replace:
-    path: /root/calico-{{ calico_version }}.yaml
-    regexp: '^( +)# - name: CALICO_IPV4POOL_CIDR\n +#   value: "[^"]*"$'
-    replace: '\1- name: CALICO_IPV4POOL_CIDR\n\1  value: "{{ pod_subnet }}"\n\1- name: IP_AUTODETECTION_METHOD\n\1  value: "cidr={{ cluster_cidr }}"'
-
-- name: Confirm the edit landed
-  ansible.builtin.command:
-    argv: [grep, -c, 'value: "cidr={{ cluster_cidr }}"', '/root/calico-{{ calico_version }}.yaml']
-  register: calico_edit
-  changed_when: false
-  failed_when: calico_edit.stdout | int != 1
+  ansible.builtin.copy:
+    dest: /root/calico-{{ calico_version }}.yaml
+    content: >-
+      {{ calico_orig.content | b64decode
+         | regex_replace(calico_pool_cidr_regex, calico_pool_cidr_replacement, multiline=True, mandatory_count=1) }}
+    mode: '0644'
+  vars:
+    calico_pool_cidr_regex: '^( +)# - name: CALICO_IPV4POOL_CIDR\n +#   value: "[^"]*"$'
+    calico_pool_cidr_replacement: '\1- name: CALICO_IPV4POOL_CIDR\n\1  value: "{{ pod_subnet }}"\n\1- name: IP_AUTODETECTION_METHOD\n\1  value: "cidr={{ cluster_cidr }}"'
+  register: calico_manifest
 
 # Server-side: Calico's CRDs exceed the client-side last-applied annotation
 # limit. Re-applying an unchanged manifest is a no-op.
@@ -198,7 +205,7 @@
   until: calico_apply.rc == 0
   retries: 12
   delay: 30
-  changed_when: calico_download is changed
+  changed_when: calico_manifest is changed
 
 # Join tokens expire. Writing the command to a file once with `creates:` meant
 # every later run reused a dead token, and the workers failed with "could not
