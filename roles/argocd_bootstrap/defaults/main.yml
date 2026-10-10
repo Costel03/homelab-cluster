@@ -19,6 +19,8 @@ argocd_values:
           end
         end
         return hs
+  # Sized from measured use on the running cluster. No CPU limits: throttling
+  # only makes probes time out (repo-server was killed six times that way).
   server:
     replicas: 1
     service:
@@ -28,29 +30,50 @@ argocd_values:
     ingress:
       enabled: false
     resources:
-      requests: { cpu: 50m, memory: 128Mi }
-      limits: { cpu: 300m, memory: 384Mi }
+      requests: { cpu: 20m, memory: 48Mi }
+      limits: { memory: 256Mi }
+  # Holds every resource of every app in memory. It was OOMKilled at 512Mi on
+  # the first full sync and sits around 270Mi after it.
   controller:
     replicas: 1
     resources:
-      requests: { cpu: 100m, memory: 256Mi }
-      limits: { cpu: 500m, memory: 512Mi }
+      requests: { cpu: 100m, memory: 384Mi }
+      limits: { memory: 1Gi }
+  # Rendering a dozen charts at once on a cold sync is its peak.
   repoServer:
     replicas: 1
-    # No CPU limit: rendering a dozen charts at once on a cold sync got it
-    # throttled at 300m, /healthz then missed its 1s timeout, and the kubelet
-    # killed it mid-render six times over. Memory stays capped.
     resources:
-      requests: { cpu: 100m, memory: 256Mi }
-      limits: { memory: 512Mi }
+      requests: { cpu: 50m, memory: 192Mi }
+      limits: { memory: 768Mi }
     livenessProbe:
       timeoutSeconds: 5
   applicationSet:
     replicas: 1
     resources:
-      requests: { cpu: 25m, memory: 64Mi }
-      limits: { cpu: 100m, memory: 128Mi }
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 128Mi }
   redis:
     resources:
-      requests: { cpu: 25m, memory: 64Mi }
-      limits: { cpu: 100m, memory: 128Mi }
+      requests: { cpu: 10m, memory: 16Mi }
+      limits: { memory: 64Mi }
+  notifications:
+    resources:
+      requests: { cpu: 5m, memory: 24Mi }
+      limits: { memory: 96Mi }
+  # Dex is ArgoCD's SSO bridge. Login here is the local admin account.
+  dex:
+    enabled: false
+
+# L2 mode only: FRR is MetalLB's BGP daemon, and it restarted eight times on
+# master for nothing.
+metallb_values:
+  speaker:
+    frr:
+      enabled: false
+    resources:
+      requests: { cpu: 20m, memory: 24Mi }
+      limits: { memory: 96Mi }
+  controller:
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 128Mi }
