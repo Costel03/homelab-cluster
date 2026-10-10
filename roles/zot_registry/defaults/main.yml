@@ -1,0 +1,3 @@
+---
+# Windows logon task that keeps the WSL distro, and so Zot, running.
+zot_keepalive_task: homelab-wsl

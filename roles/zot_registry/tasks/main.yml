@@ -100,29 +100,29 @@
   until: zot_probe is succeeded
 
 # WSL is NAT'd, so VMs on the host-only network cannot reach it directly.
-# WSL changes address on every restart, so the forwarding has to be refreshed
-# rather than set up once.
-- name: Check whether the registry is already reachable on the host-only address
-  ansible.builtin.uri:
-    url: "http://{{ host_ip }}:{{ registry_port }}/v2/"
-    status_code: [200, 401]
-    timeout: 5
-  register: hostonly_probe
-  failed_when: false
+# Windows forwards the host-only address to WSL's localhost relay on [::1],
+# which, unlike WSL's own IP, survives WSL restarts; and a logon task keeps
+# the distro running, since WSL otherwise stops it once no terminal is open.
+# Both are set up once, so the UAC prompt below only appears the first time.
+- name: Check the Windows side is already in place
+  ansible.builtin.command:
+    argv:
+    - /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+    - -NoProfile
+    - -Command
+    - >-
+      $fwd = (netsh interface portproxy show v4tov6) -match '{{ host_ip | regex_escape }}\s+{{ registry_port }}\s+::1';
+      $task = Get-ScheduledTask -TaskName {{ zot_keepalive_task }} -ErrorAction SilentlyContinue;
+      if ($fwd -and $task) { 'ready' } else { 'missing' }
+  register: windows_side
+  changed_when: false
 
-- name: Refresh the Windows port forwarding
-  when: hostonly_probe.status is not defined or hostonly_probe.status not in [200, 401]
+- name: Set up the forward and the keep-alive task (accept the UAC prompt)
+  when: windows_side.stdout | trim != 'ready'
   block:
-  - name: Read the current WSL address
-    ansible.builtin.shell:
-      cmd: set -o pipefail && ip -4 -o addr show eth0 | awk '{print $4}' | cut -d/ -f1
-      executable: /bin/bash
-    register: wsl_ip
-    changed_when: false
-
-  # Triggers a UAC prompt — netsh portproxy and the firewall rule both need
-  # Administrator, and WSL cannot elevate on its own.
-  - name: Forward the host-only address to WSL (accept the UAC prompt)
+  # Needs Administrator for netsh portproxy and the firewall rule, and WSL
+  # cannot elevate on its own.
+  - name: Run the setup script elevated
     ansible.builtin.command:
       argv:
       - /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
@@ -131,16 +131,17 @@
       - >-
         Start-Process powershell -Verb RunAs -Wait -ArgumentList
         @('-NoProfile','-ExecutionPolicy','Bypass','-File','{{ portproxy_script_win }}',
-        '-WslIp','{{ wsl_ip.stdout | trim }}',
         '-Port','{{ registry_port }}',
-        '-HostOnlyIp','{{ host_ip }}')
+        '-HostOnlyIp','{{ host_ip }}',
+        '-Distro','{{ lookup('ansible.builtin.env', 'WSL_DISTRO_NAME') | default('Ubuntu-24.04', true) }}',
+        '-TaskName','{{ zot_keepalive_task }}')
     changed_when: true
 
-  - name: Verify the registry is now reachable from the host-only address
-    ansible.builtin.uri:
-      url: "http://{{ host_ip }}:{{ registry_port }}/v2/"
-      status_code: [200, 401]
-    register: zot_hostonly
-    retries: 5
-    delay: 3
-    until: zot_hostonly is succeeded
+- name: Verify the registry answers on the host-only address
+  ansible.builtin.uri:
+    url: "http://{{ host_ip }}:{{ registry_port }}/v2/"
+    status_code: [200, 401]
+  register: zot_hostonly
+  retries: 5
+  delay: 3
+  until: zot_hostonly is succeeded

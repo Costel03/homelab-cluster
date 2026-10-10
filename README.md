@@ -138,10 +138,15 @@ on the first run into `~/.config/homelab/zot-ci.password` and handed to the
 runner. Zot also scans everything it stores for CVEs, including bootstrap
 images CI never sees — browse `http://192.168.56.1:5000`.
 
-WSL is NAT'd, so `make registry` also forwards `192.168.56.1:5000` to it. That
-**triggers a UAC prompt** — `netsh portproxy` and the firewall rule need
-Administrator. WSL changes address on every restart, so re-run `make registry`
-after `wsl --shutdown`.
+WSL is NAT'd, so `make registry` also sets up the Windows side, once, behind
+a **UAC prompt** (`netsh portproxy` and the firewall rule need Administrator):
+
+| Piece | Why |
+|---|---|
+| `192.168.56.1:5000` forwarded to `[::1]:5000` | That is WSL's localhost relay, which survives WSL restarts; WSL's own IP changes on every one |
+| `homelab-wsl` logon task | Keeps the distro running with a hidden `sleep infinity`, so Zot is up whenever you are logged in. WSL otherwise stops a distro soon after its last terminal closes, and with Zot down ArgoCD cannot render any app |
+
+Later runs check both and skip the prompt.
 
 ## CI runner
 
@@ -150,14 +155,8 @@ A GitHub Actions runner for homelab-gitops runs as the unprivileged
 workflow can push to `localhost:5000` without the registry ever being exposed.
 Only that workflow uses it; pull-request checks run on GitHub-hosted runners.
 
-The runner and Zot only run while WSL does. WSL stops a distro shortly after
-its last terminal closes, so either keep one open or, in
-`%UserProfile%\.wslconfig`:
-
-```ini
-[wsl2]
-vmIdleTimeout=-1
-```
+The runner and Zot only run while WSL does; the `homelab-wsl` logon task
+above keeps it running.
 
 ## Requirements
 
