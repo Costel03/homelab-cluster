@@ -122,7 +122,7 @@
 
 - name: Require containerd 2.x
   ansible.builtin.assert:
-    that: containerd_version.stdout is search(' v2\.')
+    that: containerd_version.stdout is search(' v?2\.[0-9]+')
     fail_msg: "Expected containerd 2.x from the Docker repo, got: {{ containerd_version.stdout }}"
     quiet: true
 

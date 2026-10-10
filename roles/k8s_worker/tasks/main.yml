@@ -32,10 +32,30 @@
     delegate_to: "{{ groups['masters'][0] }}"
     changed_when: false
 
-  - name: Remove old CNI configuration
+  # Empty the directory but keep it: containerd 2.x's CRI plugin watches
+  # /etc/cni/net.d and exits ("cni conf dir is removed") if it disappears, and
+  # the join then hits a dead socket in the seconds before systemd restarts it.
+  - name: Find CNI configuration left from a previous join
+    ansible.builtin.find:
+      paths: /etc/cni/net.d
+      file_type: any
+    register: old_cni
+
+  - name: Remove it
     ansible.builtin.file:
-      path: /etc/cni/net.d
+      path: "{{ item.path }}"
       state: absent
+    loop: "{{ old_cni.files }}"
+    loop_control:
+      label: "{{ item.path }}"
+
+  - name: Wait for the container runtime to answer
+    ansible.builtin.command: crictl info
+    register: crictl_info
+    until: crictl_info.rc == 0
+    retries: 12
+    delay: 5
+    changed_when: false
 
   - name: Join Kubernetes cluster
     ansible.builtin.command: "{{ hostvars[groups['masters'][0]].kubeadm_join_command.stdout }}"
