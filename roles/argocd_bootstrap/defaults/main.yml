@@ -37,9 +37,14 @@ argocd_values:
       limits: { cpu: 500m, memory: 512Mi }
   repoServer:
     replicas: 1
+    # No CPU limit: rendering a dozen charts at once on a cold sync got it
+    # throttled at 300m, /healthz then missed its 1s timeout, and the kubelet
+    # killed it mid-render six times over. Memory stays capped.
     resources:
       requests: { cpu: 100m, memory: 256Mi }
-      limits: { cpu: 300m, memory: 512Mi }
+      limits: { memory: 512Mi }
+    livenessProbe:
+      timeoutSeconds: 5
   applicationSet:
     replicas: 1
     resources:
