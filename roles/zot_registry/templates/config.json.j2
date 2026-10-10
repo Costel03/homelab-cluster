@@ -9,6 +9,7 @@
   "http": {
     "address": "0.0.0.0",
     "port": "{{ registry_port }}",
+    "compat": ["docker2s2"],
     "auth": {
       "htpasswd": { "path": "/etc/zot/htpasswd" },
       "failDelay": 1
@@ -41,6 +42,7 @@
           "urls": ["{{ reg.upstream }}"],
           "content": [{ "prefix": "**", "destination": "/{{ reg.name }}" }],
           "onDemand": true,
+          "preserveDigest": true,
           "tlsVerify": true,
           "maxRetries": 3,
           "retryDelay": "5s"
