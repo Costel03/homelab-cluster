@@ -21,9 +21,11 @@
 - name: Stop if there is nothing for ArgoCD to sync yet
   ansible.builtin.fail:
     msg: >-
-      {{ gitops_repo_url }} has no '{{ gitops_repo_revision }}' branch. Push homelab-gitops and
-      let the publish workflow run once (Actions > publish > Run workflow, all apps) so the
-      charts and images are in Zot, then re-run make apps.
+      {{ gitops_repo_url }} has no '{{ gitops_repo_revision }}' branch, so ArgoCD would have nothing
+      to sync. Fill Zot and create it, either with the publish workflow (Actions > publish > Run
+      workflow, all apps — needs the self-hosted runner) or by hand from WSL: run
+      scripts/app.sh publish <app> for every app in homelab-gitops, then
+      git push origin main:{{ gitops_repo_revision }}. Re-run make apps afterwards.
   when: gitops_branch.rc != 0
 
 - name: Install MetalLB
