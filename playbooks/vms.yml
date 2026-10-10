@@ -38,13 +38,13 @@
 # here (WSL2 owns VT-x), and in that mode Linux guests that boot at the same
 # time stall — the APIC timer VirtualBox emulates stops firing, so the kernel
 # spins in its RAID6 benchmark or logs RCU stalls, and VBox.log shows
-# "TM: Giving up catch-up attempt". A VM that wedges anyway is reset.
+# "TM: Giving up catch-up attempt". A VM that wedges anyway is power-cycled.
 - name: Boot the VMs one at a time
   hosts: k8s_nodes
   gather_facts: false
   serial: 1
   tasks:
-  - name: Boot it, resetting it if it stalls
+  - name: Boot it, power-cycling it if it stalls
     ansible.builtin.include_tasks: tasks/boot_vm.yml
     loop: "{{ range(1, vm_boot_attempts + 1) | list }}"
     loop_control:

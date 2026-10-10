@@ -79,8 +79,19 @@ Per-node overrides go in `inventory/host_vars/<name>.yml`.
 3. The NIC's MAC is derived from the node's IP, and netplan inside the guest
    matches on **that MAC** rather than an interface name — VirtualBox NIC
    naming varies by chipset, MACs do not.
-4. `k8s_common` / `k8s_master` / `k8s_worker` install containerd and Kubernetes
+4. The VMs boot **one at a time**: each must answer on SSH and finish
+   cloud-init before the next starts, and one that stalls is powered off and
+   started again (up to `vm_boot_attempts`).
+5. `k8s_common` / `k8s_master` / `k8s_worker` install containerd and Kubernetes
    and run `kubeadm`.
+
+Why one at a time: WSL2 keeps Hyper-V on, so VirtualBox cannot use VT-x and
+runs on the Windows Hypervisor Platform instead (the green turtle;
+`VBox.log` says `fall back to NEM`). In that mode the timer VirtualBox
+emulates for the guest stops firing when several Linux guests boot together —
+the kernel hangs in its RAID6 benchmark or prints RCU stalls, and `VBox.log`
+shows `TM: Giving up catch-up attempt`. A reset does not clear it; a fresh
+start does.
 
 VirtualBox is a Windows binary driven from WSL, so the VM plays use
 `connection: local` and translate `/mnt/c/...` paths to `c:/...`.

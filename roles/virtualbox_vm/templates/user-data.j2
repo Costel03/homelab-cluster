@@ -12,6 +12,13 @@ users:
   ssh_authorized_keys:
   - {{ ssh_public_key }}
 
+# Runs early on every boot. cloud-init deletes the image's SSH host keys and
+# generates new ones on the first boot; a VM power-cycled in between — which
+# the boot play does to one that stalls — is otherwise left with no keys, and
+# sshd refuses every connection. ssh-keygen -A only creates missing keys.
+bootcmd:
+- [ssh-keygen, -A]
+
 # No packages and no package_update on purpose: the cloud image already ships
 # python3, which is all Ansible needs, and an apt update on first boot adds
 # minutes per node for nothing. k8s_common installs everything else.

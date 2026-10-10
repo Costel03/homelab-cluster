@@ -1,41 +1,81 @@
 ---
-# One boot attempt for one VM: start it if it is off, reset it if a previous
-# attempt left it wedged, then wait for SSH. Sets vm_booted.
+# One boot attempt for one VM: start it if it is off, power-cycle it if a
+# previous attempt left it wedged, then wait until it has finished booting — SSH up and
+# cloud-init done — so the next VM never boots while this one still is.
+# Sets vm_booted. Skipped entirely once a previous attempt succeeded; the
+# condition sits here rather than on the include, because a looped include
+# evaluates its `when` for every item before running any of them.
 
-- name: Check whether it is running
-  ansible.builtin.command:
-    argv: ['{{ vbox_manage }}', list, runningvms]
-  register: running_now
-  changed_when: false
-  delegate_to: localhost
+- name: Boot attempt {{ boot_attempt }}
+  when: not (vm_booted | default(false))
+  block:
+  - name: Check whether it is running
+    ansible.builtin.command:
+      argv: ['{{ vbox_manage }}', list, runningvms]
+    register: running_now
+    changed_when: false
+    delegate_to: localhost
 
-- name: Start it
-  ansible.builtin.command:
-    argv: ['{{ vbox_manage }}', startvm, '{{ inventory_hostname }}', --type, headless]
-  delegate_to: localhost
-  changed_when: true
-  when: running_now.stdout_lines | select('match', '^"' ~ inventory_hostname ~ '"') | list | length == 0
+  - name: Note whether it is running
+    ansible.builtin.set_fact:
+      vm_running: "{{ running_now.stdout_lines | select('match', '^\"' ~ inventory_hostname ~ '\"') | list | length > 0 }}"
 
-- name: Reset it after a stalled boot, attempt {{ boot_attempt }}
-  ansible.builtin.command:
-    argv: ['{{ vbox_manage }}', controlvm, '{{ inventory_hostname }}', reset]
-  delegate_to: localhost
-  changed_when: true
-  when:
-  - boot_attempt > 1
-  - running_now.stdout_lines | select('match', '^"' ~ inventory_hostname ~ '"') | list | length > 0
+  # Power off rather than reset: a reset keeps the same VBoxHeadless process
+  # and Hyper-V partition, and a partition whose timer has fallen behind stays
+  # broken across resets — master stalled on every reset and booted only from
+  # a fresh start.
+  - name: Power it off after a stalled boot
+    ansible.builtin.command:
+      argv: ['{{ vbox_manage }}', controlvm, '{{ inventory_hostname }}', poweroff]
+    delegate_to: localhost
+    changed_when: true
+    when: boot_attempt > 1 and vm_running
 
-- name: Wait for SSH, attempt {{ boot_attempt }}
-  ansible.builtin.wait_for:
-    host: "{{ hostvars[inventory_hostname].ansible_host }}"
-    port: 22
-    timeout: "{{ vm_boot_timeout }}"
+  - name: Wait for VirtualBox to release it
+    ansible.builtin.command:
+      argv: ['{{ vbox_manage }}', list, runningvms]
+    register: still_running
+    until: still_running.stdout_lines | select('match', '^"' ~ inventory_hostname ~ '"') | list | length == 0
+    retries: 12
     delay: 5
-  delegate_to: localhost
-  register: vm_ssh
-  # A timeout is an outcome here, not an error: the next attempt resets the VM.
-  failed_when: false
+    changed_when: false
+    delegate_to: localhost
+    when: boot_attempt > 1 and vm_running
 
-- name: Remember whether it came up
-  ansible.builtin.set_fact:
-    vm_booted: "{{ 'Timeout' not in (vm_ssh.msg | default('')) }}"
+  - name: Start it
+    ansible.builtin.command:
+      argv: ['{{ vbox_manage }}', startvm, '{{ inventory_hostname }}', --type, headless]
+    delegate_to: localhost
+    changed_when: true
+    when: not vm_running or boot_attempt > 1
+
+  - name: Wait for SSH
+    ansible.builtin.wait_for:
+      host: "{{ hostvars[inventory_hostname].ansible_host }}"
+      port: 22
+      timeout: "{{ vm_boot_timeout }}"
+      delay: 5
+    delegate_to: localhost
+
+  - name: Wait for Ansible to connect
+    ansible.builtin.wait_for_connection:
+      timeout: 120
+
+  # rc 2 means cloud-init finished with recoverable errors, which is still a
+  # finished boot. ignore_unreachable: a guest that stalls mid-command drops
+  # the SSH session, and that has to count as a failed attempt, not end the play.
+  - name: Wait for cloud-init to finish
+    ansible.builtin.command: timeout {{ vm_boot_timeout }} cloud-init status --wait
+    register: cloud_init
+    changed_when: false
+    failed_when: false
+    ignore_unreachable: true
+
+  - name: Remember whether it came up
+    ansible.builtin.set_fact:
+      vm_booted: "{{ cloud_init is not unreachable and (cloud_init.rc | default(1)) in [0, 2] }}"
+
+  rescue:
+  - name: Note the failed attempt
+    ansible.builtin.debug:
+      msg: "{{ inventory_hostname }} did not finish booting on attempt {{ boot_attempt }}: {{ ansible_failed_result.msg | default('') }}"
