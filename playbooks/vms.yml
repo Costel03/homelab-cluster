@@ -33,47 +33,39 @@
     vars:
       vm_autostart: false
 
-# Started only once every disk is cloned, and staggered so three simultaneous
-# boots do not recreate the same I/O storm.
-- name: Start the VMs
+# Started only once every disk is cloned, and one at a time: each VM must
+# answer on SSH before the next one starts. VirtualBox runs on top of Hyper-V
+# here (WSL2 owns VT-x), and in that mode Linux guests that boot at the same
+# time stall — the APIC timer VirtualBox emulates stops firing, so the kernel
+# spins in its RAID6 benchmark or logs RCU stalls, and VBox.log shows
+# "TM: Giving up catch-up attempt". A VM that wedges anyway is reset.
+- name: Boot the VMs one at a time
   hosts: k8s_nodes
   gather_facts: false
   serial: 1
   tasks:
-  - name: List running VMs
-    ansible.builtin.command:
-      argv: ['{{ vbox_manage }}', list, runningvms]
-    register: running_now
-    changed_when: false
-    delegate_to: localhost
+  - name: Boot it, resetting it if it stalls
+    ansible.builtin.include_tasks: tasks/boot_vm.yml
+    loop: "{{ range(1, vm_boot_attempts + 1) | list }}"
+    loop_control:
+      loop_var: boot_attempt
+    when: not (vm_booted | default(false))
 
-  - name: Start it
-    ansible.builtin.command:
-      argv: ['{{ vbox_manage }}', startvm, '{{ inventory_hostname }}', --type, headless]
-    delegate_to: localhost
-    when: running_now.stdout_lines | select('match', '^"' ~ inventory_hostname ~ '"') | list | length == 0
-    changed_when: true
-
-  - name: Give it a head start before the next one boots
-    ansible.builtin.pause:
-      seconds: 20
-    delegate_to: localhost
+  - name: Stop if it never came up
+    ansible.builtin.assert:
+      that: vm_booted | default(false)
+      fail_msg: >-
+        {{ inventory_hostname }} did not answer on SSH after {{ vm_boot_attempts }} boots.
+        Screenshot its console to see where it stopped:
+        VBoxManage controlvm {{ inventory_hostname }} screenshotpng shot.png
+      quiet: true
 
 - name: Wait for the nodes to answer
   hosts: k8s_nodes
   gather_facts: false
   tasks:
-  # Two stages so a failure says which half broke: no port means the VM did
-  # not boot or cloud-init never brought the NIC up; port but no connection
-  # means SSH or the key is wrong.
-  - name: Wait for port 22
-    ansible.builtin.wait_for:
-      host: "{{ hostvars[inventory_hostname].ansible_host }}"
-      port: 22
-      timeout: 1200
-      delay: 10
-    delegate_to: localhost
-
+  # Port 22 is already open (the boot play waited for it); a failure here
+  # means SSH itself or the key is wrong.
   - name: Wait for Ansible to be able to run on the node
     ansible.builtin.wait_for_connection:
       timeout: 300
